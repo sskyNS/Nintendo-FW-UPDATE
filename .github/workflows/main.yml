@@ -78,17 +78,14 @@ jobs:
           echo "INFO: RSS Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 强制更新逻辑
           if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
-             echo "INFO: Triggered by Manual Force or Code Push. Skipping version check."
+             echo "INFO: Force update or Push trigger."
              echo "update_needed=true" >> $GITHUB_OUTPUT
              exit 0
           fi
 
-          # 获取当前 Release 版本
           set +e 
           CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
-          EXIT_CODE=$?
           set -e
 
           if [ -z "$CURRENT_RELEASE_VERSION" ]; then
@@ -112,7 +109,6 @@ jobs:
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
-          # 脚本现在会生成 firmware_info.txt
           python3 firmware_downloader.py | tee firmware_output.txt
 
       - name: Process firmware files
@@ -132,7 +128,7 @@ jobs:
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
-          # 打包 (单层目录结构)
+          # 单层打包
           echo "Zipping..."
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           
@@ -143,7 +139,6 @@ jobs:
           echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
           
-          # 清理
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
@@ -153,22 +148,36 @@ jobs:
           ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
         run: |
-          # 读取 Python 生成的 info 文件变量
+          # === 关键修复开始 ===
+          # 定义一个辅助函数来读取文件中的值，而不是执行 source
+          get_val() {
+            grep "^$1=" firmware_info.txt | cut -d'=' -f2-
+          }
+
           if [ -f firmware_info.txt ]; then
-             source firmware_info.txt
+             VERSION=$(get_val VERSION)
+             FILES=$(get_val FILES)
+             SIZE_BYTES=$(get_val SIZE_BYTES)
+             HASH=$(get_val HASH)
+             CHANGELOG=$(get_val CHANGELOG)
+             SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
+             SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
           else
-             # Fallback values
              VERSION="Unknown"
              FILES="0"
              SIZE_BYTES="0"
              CHANGELOG="Changelog unavailable."
+             HASH="Unknown"
+             SYSTEM_VERSION_FAT="Unknown"
+             SYSTEM_VERSION_EXFAT="Unknown"
           fi
+          # === 关键修复结束 ===
 
-          # 计算 MB 显示
+          # 计算 MB 大小
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
 
-          # 构建精简美观的发布页内容
+          # 构建发布内容
           {
             echo "release_body<<EOF"
             echo "## 🚀 Firmware $VERSION"
