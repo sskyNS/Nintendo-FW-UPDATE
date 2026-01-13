@@ -1,19 +1,14 @@
-name: 🎮 Firmware Auto Downloader (Fixed URL)
+name: 🎮 Firmware Auto Downloader (Fixed)
 
 on:
-  # 1. 每天每小时检查一次
   schedule:
     - cron: '0 * * * *'
-  
-  # 2. 当代码推送到主分支时自动运行 (忽略文档修改)
   push:
     branches: [ "main", "master" ]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
-
-  # 3. 允许手动点击按钮强制运行
   workflow_dispatch:
     inputs:
       force_update:
@@ -26,7 +21,7 @@ jobs:
   update_release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # ⚠️ 读写权限用于发布 Release
+      contents: write
 
     steps:
       - name: Checkout code
@@ -42,6 +37,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests anynet beautifulsoup4
+          sudo apt-get update
+          sudo apt-get install -y aria2
 
       - name: Setup hactool
         run: |
@@ -57,7 +54,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # --- 1. 获取 RSS 最新版本 ---
+          # 获取 RSS 最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
@@ -72,15 +69,14 @@ jobs:
           echo "INFO: RSS Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # --- 2. 强制更新逻辑 (手动 或 代码推送) ---
-          # 如果是手动触发且勾选了Force，或者是代码Push触发，则强制更新
+          # 强制更新逻辑
           if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
              echo "INFO: Triggered by Manual Force or Code Push. Skipping version check."
              echo "update_needed=true" >> $GITHUB_OUTPUT
              exit 0
           fi
 
-          # --- 3. 获取当前 Release 版本 (定时任务逻辑) ---
+          # 获取当前 Release 版本
           set +e 
           CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           EXIT_CODE=$?
@@ -90,7 +86,7 @@ jobs:
             CURRENT_RELEASE_VERSION="0.0.0"
           fi
           
-          # --- 4. 比对版本 ---
+          # 比对版本
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
             echo "INFO: Version match ($NEW_VERSION). No update needed."
             echo "update_needed=false" >> $GITHUB_OUTPUT
@@ -98,119 +94,115 @@ jobs:
             echo "INFO: New version found ($NEW_VERSION vs $CURRENT_RELEASE_VERSION)!"
             echo "update_needed=true" >> $GITHUB_OUTPUT
           fi
-        shell: bash
 
       - name: Execute download script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 先清理旧的固件文件夹和zip文件
+          # 清理旧文件
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
+          rm -f firmware_info.txt firmware_output.txt 2>/dev/null || true
           
+          # 执行下载脚本
           python3 firmware_downloader.py | tee firmware_output.txt
           
-          # 提取最后 6 行 (包含 DOWNLOAD COMPLETE 和 Hash)
-          tail -n 6 firmware_output.txt > changelog_body.txt
+          # 提取关键信息
+          tail -n 10 firmware_output.txt > changelog_body.txt
 
-      - name: Clean and Re-pack (Fix Size)
+      - name: Process firmware files
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "=== 开始清理和重新打包流程 ==="
+          echo "=== 处理固件文件 ==="
           
-          # 1. 查找固件文件夹（Python脚本创建的）
+          # 1. 查找固件文件夹
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
             echo "::error::未找到固件文件夹！"
-            echo "当前目录内容："
             ls -la
             exit 1
           fi
           
-          echo "找到固件文件夹: $FIRMWARE_FOLDER"
-          echo "文件夹大小:"
-          du -sh "$FIRMWARE_FOLDER"
+          echo "找到文件夹: $FIRMWARE_FOLDER"
           
-          # 2. 查找并删除脚本生成的zip文件（这个会导致双重压缩）
-          echo "=== 查找脚本生成的zip文件 ==="
-          SCRIPT_ZIP=$(find . -maxdepth 1 -name "Firmware *.zip" | head -n 1)
-          
-          if [ -n "$SCRIPT_ZIP" ]; then
-            echo "删除脚本生成的zip文件: $SCRIPT_ZIP"
-            rm -f "$SCRIPT_ZIP"
-          else
-            echo "未找到脚本生成的zip文件，继续..."
-          fi
-          
-          # 3. 删除文件夹内的所有zip文件（如果有）
-          echo "=== 清理文件夹内的zip文件 ==="
-          find "$FIRMWARE_FOLDER" -name "*.zip" -type f -delete
-          
-          # 4. 检查文件夹内容
-          echo "=== 文件夹内容检查 ==="
-          echo "文件夹内文件数量:"
-          find "$FIRMWARE_FOLDER" -type f | wc -l
-          echo "前20个文件:"
-          find "$FIRMWARE_FOLDER" -type f | head -20
-          
-          # 5. 计算原始文件夹大小
-          ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
-          echo "原始文件夹大小: $((ORIGINAL_SIZE / 1024 / 1024)) MB"
-          
-          # 6. 删除任何现有的Firmware.zip
-          echo "=== 清理旧的打包文件 ==="
+          # 2. 删除脚本可能生成的zip文件（防止双重压缩）
+          rm -f "$FIRMWARE_FOLDER.zip" 2>/dev/null || true
           rm -f Firmware.zip 2>/dev/null || true
           
-          # 7. 重新打包文件夹（直接打包内容，不包含父目录）
-          echo "=== 开始重新打包 ==="
-          cd "$FIRMWARE_FOLDER"
-          zip -r -9 -q ../Firmware.zip .
-          cd ..
+          # 3. 检查文件夹内容
+          echo "文件夹大小:"
+          du -sh "$FIRMWARE_FOLDER"
+          echo "文件数量:"
+          find "$FIRMWARE_FOLDER" -type f | wc -l
           
-          # 8. 验证打包结果
-          echo "=== 验证打包结果 ==="
-          echo "生成的Firmware.zip大小:"
+          # 4. 计算原始大小
+          ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
+          echo "原始大小: $((ORIGINAL_SIZE / 1024 / 1024)) MB"
+          
+          # 5. 重新打包（单层压缩）
+          echo "正在打包..."
+          (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
+          
+          # 6. 验证结果
+          echo "打包结果:"
           ls -lh Firmware.zip
           
-          echo "ZIP文件内部结构:"
-          unzip -l Firmware.zip | head -10
-          
           ZIP_SIZE=$(stat -c%s "Firmware.zip")
-          echo "ZIP文件大小: $((ZIP_SIZE / 1024 / 1024)) MB"
+          echo "ZIP大小: $((ZIP_SIZE / 1024 / 1024)) MB"
           
-          # 9. 清理中间文件夹（可选）
-          echo "=== 清理中间文件 ==="
+          # 7. 计算哈希
+          echo "计算SHA256..."
+          SHA256_HASH=$(sha256sum Firmware.zip | cut -d' ' -f1)
+          echo "SHA256: $SHA256_HASH"
+          echo "sha256_hash=$SHA256_HASH" >> $GITHUB_ENV
+          
+          # 8. 清理中间文件
           rm -rf "$FIRMWARE_FOLDER"
-          
-          echo "=== 打包完成 ==="
-          echo "最终文件: Firmware.zip"
-          echo "最终大小: $((ZIP_SIZE / 1024 / 1024)) MB"
 
-      - name: Prepare Release Body
-        id: prepare_body
+      - name: Prepare release information
         if: steps.version_check.outputs.update_needed == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            try {
-              const body = fs.readFileSync('changelog_body.txt', 'utf8').trim();
-              core.setOutput('release_body', body);
-            } catch (error) {
-              core.setOutput('release_body', 'No details available.');
-            }
+        id: prep_release
+        run: |
+          # 读取固件信息
+          if [ -f firmware_info.txt ]; then
+            FIRMWARE_SIZE=$(grep 'Size:' firmware_info.txt | cut -d' ' -f2)
+            FIRMWARE_FILES=$(grep 'Files:' firmware_info.txt | cut -d' ' -f2)
+            TOTAL_HASH=$(grep 'Total Hash:' firmware_info.txt | cut -d' ' -f3)
+            CHANGELOG=$(grep -A 1 'Changelog:' firmware_info.txt | tail -n 1 || echo "No changelog available")
+          else
+            FIRMWARE_SIZE="Unknown"
+            FIRMWARE_FILES="Unknown"
+            TOTAL_HASH="Unknown"
+            CHANGELOG=$(tail -n 5 changelog_body.txt || echo "No changelog available")
+          fi
+          
+          # 格式化发布内容
+          RELEASE_BODY="检测到新版本：${{ steps.version_check.outputs.new_version }}
+          
+          该固件已自动从任天堂官方服务器下载、校验并重新打包。
+          
+          📊 固件信息：
+          - 文件数量: $FIRMWARE_FILES
+          - 原始大小: $((FIRMWARE_SIZE / 1024 / 1024)) MB
+          - 打包大小: $((ZIP_SIZE / 1024 / 1024)) MB
+          - 完整性校验: $TOTAL_HASH
+          - 发布包SHA256: ${{ env.sha256_hash }}
+          
+          📝 更新详情：
+          $CHANGELOG
+        "
+          
+          echo "release_body<<EOF" >> $GITHUB_OUTPUT
+          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Update Latest Release
+      - name: Create Release
         if: steps.version_check.outputs.update_needed == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: ${{ steps.version_check.outputs.new_version }}
-          body: |
-            检测到新版本：${{ steps.version_check.outputs.new_version }}
-            该固件已自动从任天堂官方服务器下载、校验并重新打包。
-            更新详情：
-            ${{ steps.prepare_body.outputs.release_body }}
+          name: Firmware ${{ steps.version_check.outputs.new_version }}
+          body: ${{ steps.prep_release.outputs.release_body }}
           files: |
             Firmware.zip
           make_latest: true
