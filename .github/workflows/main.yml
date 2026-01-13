@@ -63,7 +63,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取 RSS 最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
@@ -104,6 +103,7 @@ jobs:
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
+          # 彻底清理旧文件
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
           rm -f firmware_info.txt firmware_output.txt
@@ -128,7 +128,11 @@ jobs:
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
-          # 单层打包
+          # === 修复双倍大小的关键步骤 ===
+          # 1. 确保目标 zip 不存在
+          rm -f Firmware.zip
+          
+          # 2. 进入目录打包，确保结构平铺 (Single Layer)
           echo "Zipping..."
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           
@@ -148,8 +152,6 @@ jobs:
           ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
         run: |
-          # === 关键修复开始 ===
-          # 定义一个辅助函数来读取文件中的值，而不是执行 source
           get_val() {
             grep "^$1=" firmware_info.txt | cut -d'=' -f2-
           }
@@ -171,20 +173,18 @@ jobs:
              SYSTEM_VERSION_FAT="Unknown"
              SYSTEM_VERSION_EXFAT="Unknown"
           fi
-          # === 关键修复结束 ===
 
-          # 计算 MB 大小
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
 
-          # 构建发布内容
+          # === 简洁无表情版 ===
           {
             echo "release_body<<EOF"
-            echo "## 🚀 Firmware $VERSION"
+            echo "## Firmware $VERSION"
             echo ""
             echo "Automatic build from official Nintendo servers."
             echo ""
-            echo "### 📦 Build Info"
+            echo "### Build Info"
             echo "| Property | Value |"
             echo "| :--- | :--- |"
             echo "| **File Count** | $FILES |"
@@ -192,11 +192,11 @@ jobs:
             echo "| **Zip Size** | ${ZIP_MB} MB |"
             echo "| **Zip SHA256** | \`$ZIP_SHA256\` |"
             echo ""
-            echo "### 📝 Changelog"
+            echo "### Changelog"
             echo "> $CHANGELOG"
             echo ""
             echo "<details>"
-            echo "<summary>⚙️ Technical Details (SystemVersion)</summary>"
+            echo "<summary>Technical Details (SystemVersion)</summary>"
             echo ""
             echo "\`\`\`"
             echo "FAT32: $SYSTEM_VERSION_FAT"
