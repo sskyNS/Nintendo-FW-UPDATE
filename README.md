@@ -1,7 +1,7 @@
 # Nintendo-FW-UPDATE
 监控任天堂的固件更新并推送至数据库
 
-## 📥 下载统计
+## 下载统计
 
 [![Total Downloads](https://img.shields.io/github/downloads/sskyNS/Nintendo-FW-UPDATE/total?style=flat-square&color=6f42c1)](https://github.com/sskyNS/Nintendo-FW-UPDATE/releases)
 [![Latest Release Downloads](https://img.shields.io/github/downloads/sskyNS/Nintendo-FW-UPDATE/latest/total?style=flat-square&color=blue)](https://github.com/sskyNS/Nintendo-FW-UPDATE/releases/latest)
