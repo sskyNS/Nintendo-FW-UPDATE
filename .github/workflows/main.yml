@@ -2,11 +2,11 @@ name: 🎮 Firmware Auto Downloader (Fixed URL)
 
 on:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+    - cron: '0 * * * *' # 每小时检查一次
+  workflow_dispatch:    # 允许手动触发
     inputs:
       force_update:
-        description: 'Force update (ignore version check)'
+        description: '强制更新 (忽略版本检查)'
         required: false
         default: true
         type: boolean
@@ -15,116 +15,132 @@ jobs:
   update_release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # ⚠️ 必须权限：允许创建 Release
+      contents: write # ⚠️ 必须权限：允许创建和上传 Release
 
     steps:
-      - name: ⬇️ Checkout code
+      - name: ⬇️ 检出代码 (Checkout)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 🐍 Setup Python and dependencies
+      - name: 🐍 配置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
       
-      - name: ⚙️ Install required Python modules
+      - name: ⚙️ 安装依赖库
         run: |
           pip install requests anynet beautifulsoup4
 
-      - name: ⬇️ Setup hactool-linux
+      - name: ⬇️ 配置 hactool
         run: |
-          # 确保仓库里有这个文件，否则会报错
+          # 检查仓库根目录是否有 hactool-linux
           if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool
             chmod +x hactool
           else
-            echo "::warning::hactool-linux not found in root! Script might fail."
+            echo "::warning::未在根目录找到 hactool-linux，脚本可能会失败！"
           fi
 
-      - name: 🔍 Check firmware version
+      - name: 🔍 检查固件版本
         id: version_check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 获取 RSS 源中的最新版本
+          # 1. 从 RSS 获取最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
                          head -n 1)
 
           if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::Could not retrieve RSS feed."
+            echo "::error::无法访问 RSS 源获取版本信息。"
             exit 1 
           fi
 
           NEW_VERSION=$(echo "$LATEST_TITLE" | grep -oP 'Switch \K[0-9.]+')
-          echo "INFO: Detected RSS Version: $NEW_VERSION"
+          echo "INFO: 检测到 RSS 最新版本: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 2. 检查是否强制更新
+          # 2. 判断是否手动强制更新
           if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
-             echo "INFO: Manual force update triggered."
+             echo "INFO: 检测到手动强制更新模式。"
              echo "update_needed=true" >> $GITHUB_OUTPUT
              exit 0
           fi
 
-          # 3. 安全获取当前 Latest Release 版本 (修复首次运行报错的问题)
-          set +e # 暂时允许错误，防止 gh 命令失败导致脚本退出
+          # 3. 获取 GitHub 上 'latest' Release 的版本 (防止首次运行报错)
+          set +e 
           CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           EXIT_CODE=$?
-          set -e # 恢复错误检查
+          set -e
 
+          # 如果找不到 Release，默认为 0.0.0
           if [ $EXIT_CODE -ne 0 ] || [ -z "$CURRENT_RELEASE_VERSION" ]; then
-            echo "INFO: No 'latest' release found. First run?"
+            echo "INFO: 未找到 'latest' Release，可能是首次运行。"
             CURRENT_RELEASE_VERSION="0.0.0"
           fi
           
-          echo "INFO: Current Release Version: $CURRENT_RELEASE_VERSION"
+          echo "INFO: 当前 Release 版本: $CURRENT_RELEASE_VERSION"
 
           # 4. 比对版本
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
-            echo "INFO: Version match. No update needed."
+            echo "INFO: 版本一致，无需更新。"
             echo "update_needed=false" >> $GITHUB_OUTPUT
           else
-            echo "INFO: New version found! Update needed."
+            echo "INFO: 发现新版本 ($NEW_VERSION)，准备更新！"
             echo "update_needed=true" >> $GITHUB_OUTPUT
           fi
         shell: bash
 
-      - name: 💻 Execute download script
+      - name: 💻 执行下载脚本
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "Starting download script..."
+          echo "正在启动下载脚本..."
+          # 执行脚本并将输出同时打印到屏幕和文件
           python3 firmware_downloader.py | tee firmware_output.txt
           
-          # 检查文件是否真的下载了
+          # 简单检查是否下载成功
           if ! grep -q "Firmware " firmware_output.txt; then
-             echo "::warning::Script finished but output looks suspicious. Check logs."
+             echo "::warning::脚本已完成，但日志中未检测到 'Firmware' 关键字，请检查是否出错。"
           fi
 
-          # 抓取更新日志 (如果没有日志则写入默认值)
-          tail -n 4 firmware_output.txt > changelog_body.txt
+          # 提取最后 5 行作为更新日志 (包含 KeyGeneration 等信息)
+          tail -n 5 firmware_output.txt > changelog_body.txt
+          
+          # 如果文件为空，写入默认提示
           if [ ! -s changelog_body.txt ]; then
-            echo "No changelog details available." > changelog_body.txt
+            echo "暂无详细解析内容。" > changelog_body.txt
           fi
 
-      - name: 🔄 Rename file for Fixed URL
+      - name: 📦 清理并重新打包 (解决体积过大问题)
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 查找下载的 zip 文件
-          DOWNLOADED_FILE=$(find . -maxdepth 1 -name "Firmware *.zip" | head -n 1)
+          echo "开始处理文件打包..."
           
-          if [ -f "$DOWNLOADED_FILE" ]; then
-            echo "Renaming '$DOWNLOADED_FILE' to 'Firmware.zip'..."
-            mv "$DOWNLOADED_FILE" Firmware.zip
-          else
-            echo "::error::Download failed! No zip file found matching pattern 'Firmware *.zip'."
-            ls -la # 列出当前文件以便调试
+          # 1. 强制删除 Python 脚本生成的 .zip 文件
+          # (Python脚本生成的包可能包含递归压缩或冗余数据，导致体积变成 600MB)
+          rm -f *.zip
+          
+          # 2. 寻找下载好的固件文件夹 (通常是以 Firmware 开头的文件夹)
+          FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
+          
+          if [ -z "$FIRMWARE_FOLDER" ]; then
+            echo "::error::未找到固件文件夹！下载可能失败。"
+            ls -la
             exit 1
           fi
+          
+          echo "找到固件文件夹: $FIRMWARE_FOLDER"
+          
+          # 3. 使用系统 zip 命令进行高压缩率打包
+          # -r 递归, -9 最高压缩, -q 安静模式
+          zip -r -9 -q Firmware.zip "$FIRMWARE_FOLDER"
+          
+          echo "✅ 打包完成。文件大小如下："
+          ls -lh Firmware.zip
 
-      - name: 📝 Prepare Release Body
+      - name: 📝 读取日志内容
         id: prepare_body
         if: steps.version_check.outputs.update_needed == 'true'
         uses: actions/github-script@v7
@@ -135,26 +151,31 @@ jobs:
               const changelogBody = fs.readFileSync('changelog_body.txt', 'utf8');
               core.setOutput('release_body', changelogBody);
             } catch (error) {
-              core.setOutput('release_body', 'No details available.');
+              core.setOutput('release_body', '无详细日志。');
             }
 
-      - name: 🚀 Update "Latest" Release
+      - name: 🚀 发布中文 Release (始终覆盖 latest)
         if: steps.version_check.outputs.update_needed == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: ${{ steps.version_check.outputs.new_version }}
+          name: Switch 固件 ${{ steps.version_check.outputs.new_version }}
           body: |
-            **Latest Firmware Version: ${{ steps.version_check.outputs.new_version }}**
+            🎉 **检测到新版本：${{ steps.version_check.outputs.new_version }}**
             
-            Automatic download from official source.
+            该固件已自动从任天堂官方服务器下载、校验并重新打包。
             
             ---
-            **Changelog:**
+            
+            📋 **解析到的更新详情：**
+            
+            ```text
             ${{ steps.prepare_body.outputs.release_body }}
+            ```
             
             ---
-            ⬇️ **Fixed Download Link:**
+            
+            ⬇️ **固定下载链接 (始终为最新版):**
             https://github.com/${{ github.repository }}/releases/download/latest/Firmware.zip
           files: |
             Firmware.zip
