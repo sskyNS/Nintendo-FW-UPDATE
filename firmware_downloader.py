@@ -32,7 +32,6 @@ ENV     = "lp1"
 VERSION = argv[1] if len(argv) > 1 else ""
 DEFAULT_CHANGELOG = "General system stability improvements to enhance the user's experience."
 
-# --- Helper Functions (No changes here mostly) ---
 def readdata(f, addr, size):
     f.seek(addr)
     return f.read(size)
@@ -196,60 +195,35 @@ def dltitle(title_id, version, is_su=False):
                     ver_dir, f"{nca_id}.nca", nca_hash
                 ))
 
-def zipdir(src_dir, out_zip):
-    with ZipFile(out_zip, "w", compression=ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(src_dir):
-            for name in files:
-                full = os.path.join(root, name)
-                rel  = os.path.relpath(full, start=src_dir) 
-                zf.write(full, arcname=rel)
-
 def get_changelog_robust(version_str):
-    """
-    Fetches the yls8 RSS feed, finds the entry for the current version,
-    extracts the report link, and scrapes the changelog text.
-    """
     print("Attempting to fetch changelog...")
     try:
-        # 1. Get RSS Feed
         rss_url = "https://yls8.mtheall.com/ninupdates/feed.php"
         rss_resp = request("GET", rss_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
-        if rss_resp.status_code != 200:
-            return DEFAULT_CHANGELOG
+        if rss_resp.status_code != 200: return DEFAULT_CHANGELOG
 
-        # 2. Find Link for current version (e.g. "Switch 21.2.0")
-        # Pattern: <title>Switch 21.2.0 (bee)</title> ... <link>url</link>
-        # We look for the version string in the content
         content = rss_resp.text
-        
-        # Simple string search to find the block
         target_title = f"Switch {version_str}"
         item_start = content.find(target_title)
         
-        if item_start == -1:
-            print("Current version not found in RSS feed yet.")
-            return DEFAULT_CHANGELOG
+        if item_start == -1: return DEFAULT_CHANGELOG
             
-        # Find the <link> tag after the title
         link_start = content.find("<link>", item_start)
         link_end = content.find("</link>", link_start)
         
-        if link_start == -1 or link_end == -1:
-            return DEFAULT_CHANGELOG
+        if link_start == -1 or link_end == -1: return DEFAULT_CHANGELOG
             
         report_url = content[link_start+6 : link_end].strip()
-        report_url = html.unescape(report_url) # Decode &amp; to &
+        report_url = html.unescape(report_url)
         print(f"Found report URL: {report_url}")
 
-        # 3. Scrape the specific report page
         report_resp = request("GET", report_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
         if report_resp.status_code == 200:
-            # Regex to find the cell after "Changelog text"
             match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.IGNORECASE | re.DOTALL)
             if match:
                 text = match.group(1).strip()
-                text = re.sub(r'<[^>]+>', '', text) # Remove HTML tags
-                text = re.sub(r'\s+', ' ', text)    # Normalize whitespace
+                text = re.sub(r'<[^>]+>', '', text)
+                text = re.sub(r'\s+', ' ', text) # Remove newlines to avoid grep issues
                 if len(text) > 5:
                     return text
     except Exception as e:
@@ -316,10 +290,8 @@ if __name__ == "__main__":
         if not exists(fpath): failed = True
     if failed: exit(1)
 
-    # --- Fetch Changelog via RSS matching ---
     changelog_text = get_changelog_robust(ver_string_simple)
 
-    # --- Verification & Stats ---
     print("Calculating verification data...")
     all_data = b''
     total_size = 0
@@ -331,7 +303,6 @@ if __name__ == "__main__":
     
     total_hash = hashlib.sha256(all_data).hexdigest()
 
-    # --- Save Clean Info for GitHub Actions ---
     with open('firmware_info.txt', 'w') as f:
         f.write(f"VERSION={ver_string_simple}\n")
         f.write(f"FILES={len(update_files)}\n")
