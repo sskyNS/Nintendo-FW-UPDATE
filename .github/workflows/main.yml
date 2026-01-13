@@ -2,14 +2,20 @@ name: 🎮 Firmware Auto Downloader (Fixed URL)
 
 on:
   schedule:
-    - cron: '0 * * * *' # 每小时检查一次
-  workflow_dispatch:    # 允许手动触发
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: 'Force update (ignore version check)'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   update_release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 必须权限：允许修改 Release
+      contents: write # ⚠️ 必须权限：允许创建 Release
 
     steps:
       - name: ⬇️ Checkout code
@@ -28,10 +34,15 @@ jobs:
 
       - name: ⬇️ Setup hactool-linux
         run: |
-          cp hactool-linux hactool
-          chmod +x hactool
-          
-      - name: 🔍 Check firmware version (Compare with Latest Release)
+          # 确保仓库里有这个文件，否则会报错
+          if [ -f "hactool-linux" ]; then
+            cp hactool-linux hactool
+            chmod +x hactool
+          else
+            echo "::warning::hactool-linux not found in root! Script might fail."
+          fi
+
+      - name: 🔍 Check firmware version
         id: version_check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -43,50 +54,73 @@ jobs:
                          head -n 1)
 
           if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::Could not retrieve the firmware title for Switch 1 from the RSS feed."
+            echo "::error::Could not retrieve RSS feed."
             exit 1 
           fi
 
           NEW_VERSION=$(echo "$LATEST_TITLE" | grep -oP 'Switch \K[0-9.]+')
           echo "INFO: Detected RSS Version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 2. 获取当前 GitHub 'latest' Release 的名字 (假设名字就是版本号)
-          # 如果没有 Release，默认为 0.0.0
-          CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null || echo "0.0.0")
+          # 2. 检查是否强制更新
+          if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
+             echo "INFO: Manual force update triggered."
+             echo "update_needed=true" >> $GITHUB_OUTPUT
+             exit 0
+          fi
+
+          # 3. 安全获取当前 Latest Release 版本 (修复首次运行报错的问题)
+          set +e # 暂时允许错误，防止 gh 命令失败导致脚本退出
+          CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
+          EXIT_CODE=$?
+          set -e # 恢复错误检查
+
+          if [ $EXIT_CODE -ne 0 ] || [ -z "$CURRENT_RELEASE_VERSION" ]; then
+            echo "INFO: No 'latest' release found. First run?"
+            CURRENT_RELEASE_VERSION="0.0.0"
+          fi
+          
           echo "INFO: Current Release Version: $CURRENT_RELEASE_VERSION"
 
-          # 3. 比对版本
+          # 4. 比对版本
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
             echo "INFO: Version match. No update needed."
             echo "update_needed=false" >> $GITHUB_OUTPUT
           else
-            echo "INFO: New version found! Update needed ($CURRENT_RELEASE_VERSION -> $NEW_VERSION)."
+            echo "INFO: New version found! Update needed."
             echo "update_needed=true" >> $GITHUB_OUTPUT
-            echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           fi
         shell: bash
 
       - name: 💻 Execute download script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 运行下载脚本
+          echo "Starting download script..."
           python3 firmware_downloader.py | tee firmware_output.txt
           
-          # 抓取更新日志
+          # 检查文件是否真的下载了
+          if ! grep -q "Firmware " firmware_output.txt; then
+             echo "::warning::Script finished but output looks suspicious. Check logs."
+          fi
+
+          # 抓取更新日志 (如果没有日志则写入默认值)
           tail -n 4 firmware_output.txt > changelog_body.txt
+          if [ ! -s changelog_body.txt ]; then
+            echo "No changelog details available." > changelog_body.txt
+          fi
 
       - name: 🔄 Rename file for Fixed URL
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 找到下载生成的 zip 文件 (通常包含版本号)
+          # 查找下载的 zip 文件
           DOWNLOADED_FILE=$(find . -maxdepth 1 -name "Firmware *.zip" | head -n 1)
           
           if [ -f "$DOWNLOADED_FILE" ]; then
-            echo "Renaming $DOWNLOADED_FILE to Firmware.zip..."
-            # 重命名为固定文件名
+            echo "Renaming '$DOWNLOADED_FILE' to 'Firmware.zip'..."
             mv "$DOWNLOADED_FILE" Firmware.zip
           else
-            echo "::error::Downloaded file not found!"
+            echo "::error::Download failed! No zip file found matching pattern 'Firmware *.zip'."
+            ls -la # 列出当前文件以便调试
             exit 1
           fi
 
@@ -97,15 +131,19 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const changelogBody = fs.readFileSync('changelog_body.txt', 'utf8');
-            core.setOutput('release_body', changelogBody);
+            try {
+              const changelogBody = fs.readFileSync('changelog_body.txt', 'utf8');
+              core.setOutput('release_body', changelogBody);
+            } catch (error) {
+              core.setOutput('release_body', 'No details available.');
+            }
 
       - name: 🚀 Update "Latest" Release
         if: steps.version_check.outputs.update_needed == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest           # 永远使用 'latest' 这个标签
-          name: ${{ steps.version_check.outputs.new_version }} # Release 标题显示具体版本号，方便检测逻辑
+          tag_name: latest
+          name: ${{ steps.version_check.outputs.new_version }}
           body: |
             **Latest Firmware Version: ${{ steps.version_check.outputs.new_version }}**
             
