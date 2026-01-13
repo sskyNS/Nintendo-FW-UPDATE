@@ -4,6 +4,7 @@
 import os
 import hashlib
 import warnings
+import re  # 新增引用：用于正则解析HTML
 from struct import unpack
 from binascii import hexlify
 from glob import glob
@@ -121,15 +122,10 @@ def nin_request(method, url, headers=None):
 def parse_cnmt(nca):
     ncaf = basename(nca)
     
-    # --- MODIFICATION CLÉ ---
-    # Force l'utilisation de l'exécutable hactool dans le répertoire courant.
-    # Dans le workflow, hactool-linux a été renommé en hactool et rendu exécutable.
     hactool_bin = "hactool.exe" if os.name == "nt" else "./hactool" 
-    # -----------------------
     
     cnmt_temp_dir = f"cnmt_tmp_{ncaf}"
     
-    # Le script tente de lancer './hactool'
     run(
         [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
         stdout=PIPE, stderr=PIPE
@@ -224,6 +220,25 @@ def zipdir(src_dir, out_zip):
                 rel  = os.path.relpath(full, start=src_dir) 
                 zf.write(full, arcname=rel)
 
+def get_changelog(url):
+    """
+    Parses the changelog text from the given yls8 report URL.
+    """
+    try:
+        resp = request("GET", url, headers={"User-Agent": user_agent}, verify=False)
+        if resp.status_code == 200:
+            # yls8 reports usually contain "Changelog text" in one cell and the description in the next.
+            # We use regex to extract the content of the cell following "Changelog text".
+            match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', resp.text, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                # Simple cleanup if there are basic HTML tags, though usually it's plain text here
+                text = re.sub(r'<[^>]+>', '', text) 
+                return text
+    except Exception:
+        pass
+    return "Changelog not available or parse failed."
+
 if __name__ == "__main__":
     if not exists("certificat.pem"):
         print("File 'certificat.pem' not found in root directory.")
@@ -252,7 +267,7 @@ if __name__ == "__main__":
             print("Invalid PRODINFO (invalid header)!")
             exit(1)
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
-        print("Device ID:", device_id)
+        # print("Device ID:", device_id) # Optional: comment out to reduce noise
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
@@ -316,8 +331,11 @@ if __name__ == "__main__":
         remove(out_zip)
     zipdir(ver_dir, out_zip)
 
-    print(f"Archive created: {out_zip}")
-    print(f"SystemVersion NCA FAT: {sv_nca_fat or 'Not Found'}")
-    print(f"SystemVersion NCA exFAT: {sv_nca_exfat or 'Not Found'}")
+    # --- FINAL OUTPUT MODIFICATION ---
+    
+    changelog_url = "https://yls8.mtheall.com/ninupdates/reports.php?date=2026-01-13_01-04-36&sys=bee"
+    changelog_text = get_changelog(changelog_url)
 
-    print("Verify hashes before installation!")
+    print(f"SystemVersion NCA FAT: {sv_nca_fat}")
+    print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
+    print(changelog_text)
