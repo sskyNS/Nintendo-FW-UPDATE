@@ -316,8 +316,8 @@ if __name__ == "__main__":
         remove(out_zip)
     zipdir(ver_dir, out_zip)
 
-    print("\nDOWNLOAD COMPLETE!")
     print(f"Archive created: {out_zip}")
     print(f"SystemVersion NCA FAT: {sv_nca_fat or 'Not Found'}")
     print(f"SystemVersion NCA exFAT: {sv_nca_exfat or 'Not Found'}")
+
     print("Verify hashes before installation!")
