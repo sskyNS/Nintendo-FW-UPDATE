@@ -15,7 +15,8 @@ from os import makedirs, remove
 from os.path import basename, exists, join
 from configparser import ConfigParser
 from sys import argv
-from zipfile import ZipFile, ZIP_DEFLATED 
+
+# 移除了 zipfile 引用，防止 Python 端意外压缩
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -223,7 +224,7 @@ def get_changelog_robust(version_str):
             if match:
                 text = match.group(1).strip()
                 text = re.sub(r'<[^>]+>', '', text)
-                text = re.sub(r'\s+', ' ', text) # Remove newlines to avoid grep issues
+                text = re.sub(r'\s+', ' ', text)
                 if len(text) > 5:
                     return text
     except Exception as e:
