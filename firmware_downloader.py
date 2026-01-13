@@ -16,8 +16,6 @@ from os.path import basename, exists, join
 from configparser import ConfigParser
 from sys import argv
 
-# 移除了 zipfile 引用，防止 Python 端意外压缩
-
 from requests import request
 from requests.exceptions import HTTPError
 
@@ -280,11 +278,13 @@ if __name__ == "__main__":
     queued_ncas.clear()
 
     dltitle("0100000000000816", ver_raw, is_su=True)
-    dlfiles(update_dls)
-
+    
     if not sv_nca_exfat:
+        print("INFO: exFAT not found via meta, attempting separate title...")
         dltitle("010000000000081B", ver_raw, is_su=False)
-        if sv_nca_exfat: dlfiles(update_dls)
+
+    print(f"Starting batch download for {len(update_dls)} files...")
+    dlfiles(update_dls)
 
     failed = False
     for fpath in update_files:
