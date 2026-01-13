@@ -111,23 +111,52 @@ jobs:
       - name: Clean and Re-pack (Fix Size)
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "Cleaning up all .zip files..."
-          # 彻底删除所有 zip，防止双重打包导致体积 600MB
-          find . -name "*.zip" -type f -delete
+          echo "Starting cleanup and re-pack process..."
           
+          # 1. 查找固件文件夹
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
             echo "::error::Firmware folder not found!"
+            echo "Current directory contents:"
+            ls -la
             exit 1
           fi
           
-          echo "Packing folder: $FIRMWARE_FOLDER"
-          # 重新打包，只包含纯净文件
-          zip -r -9 -q Firmware.zip "$FIRMWARE_FOLDER"
+          echo "Found firmware folder: $FIRMWARE_FOLDER"
+          echo "Folder contents before cleanup:"
+          ls -la "$FIRMWARE_FOLDER/" | head -20
           
-          echo "Final size:"
+          # 2. 清理文件夹内的所有zip文件
+          echo "Cleaning zip files inside firmware folder..."
+          find "$FIRMWARE_FOLDER" -name "*.zip" -type f -delete
+          
+          # 3. 检查文件夹是否为空
+          if [ -z "$(ls -A "$FIRMWARE_FOLDER")" ]; then
+            echo "::error::Firmware folder is empty after cleanup!"
+            exit 1
+          fi
+          
+          echo "Folder contents after cleanup:"
+          ls -la "$FIRMWARE_FOLDER/" | head -20
+          
+          # 4. 删除所有其他zip文件（包括根目录的）
+          echo "Cleaning all other zip files..."
+          find . -maxdepth 1 -name "*.zip" -type f -delete
+          
+          # 5. 直接进入文件夹打包，避免包含父路径
+          echo "Packing files from: $FIRMWARE_FOLDER"
+          (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
+          
+          # 6. 验证打包结果
+          echo "Final Firmware.zip details:"
           ls -lh Firmware.zip
+          
+          echo "Number of files in zip:"
+          unzip -l Firmware.zip | wc -l
+          
+          echo "First 10 files in zip:"
+          unzip -l Firmware.zip | head -15
 
       - name: Prepare Release Body
         id: prepare_body
@@ -154,6 +183,7 @@ jobs:
             该固件已自动从任天堂官方服务器下载、校验并重新打包。
             更新详情：
             ${{ steps.prepare_body.outputs.release_body }}
+            注意：此固件包仅包含原始固件文件，无任何额外压缩层。
           files: |
             Firmware.zip
           make_latest: true
