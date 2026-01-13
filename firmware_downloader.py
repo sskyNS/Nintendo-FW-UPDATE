@@ -326,16 +326,74 @@ if __name__ == "__main__":
     if failed:
         exit(1)
 
-    out_zip = f"{ver_dir}.zip" 
-    if exists(out_zip):
-        remove(out_zip)
-    zipdir(ver_dir, out_zip)
+from datetime import datetime
+now = datetime.utcnow()
 
-    # --- FINAL OUTPUT MODIFICATION ---
-    
-    changelog_url = "https://yls8.mtheall.com/ninupdates/reports.php?date=2026-01-13_01-04-36&sys=bee"
-    changelog_text = get_changelog(changelog_url)
+# 生成当前时间的URL格式，如 "2026-01-13_15-30-00"
+date_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+changelog_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
 
-    print(f"SystemVersion NCA FAT: {sv_nca_fat}")
-    print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
-    print(changelog_text)
+# 尝试获取更新日志（尝试当前时间和前几小时）
+changelog_text = "Changelog not available."
+for hour_offset in [0, 1, 2, 3, 6, 12, 24]:
+    try:
+        offset_time = now.replace(hour=now.hour - hour_offset)
+        date_str = offset_time.strftime("%Y-%m-%d_%H-%M-%S")
+        test_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
+        
+        resp = request("GET", test_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if resp.status_code == 200:
+            # 尝试多种匹配模式
+            patterns = [
+                r'Changelog text</td>\s*<td[^>]*>(.*?)</td>',
+                r'<td[^>]*>\s*Changelog text\s*</td>\s*<td[^>]*>(.*?)</td>',
+                r'(?:Firmware|System) update.*?changes?[^<]*</td>\s*<td[^>]*>(.*?)</td>',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, resp.text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    text = match.group(1).strip()
+                    text = re.sub(r'<[^>]+>', '', text)
+                    text = re.sub(r'\s+', ' ', text)
+                    if text and len(text) > 10:  # 确保有实际内容
+                        changelog_text = text
+                        changelog_url = test_url
+                        break
+            if changelog_text != "Changelog not available.":
+                break
+    except Exception as e:
+        continue
+
+# --- FINAL OUTPUT ---
+print(f"SystemVersion NCA FAT: {sv_nca_fat}")
+print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
+
+# 计算哈希值用于验证
+print("Calculating SHA256 hash...")
+file_hashes = []
+for fpath in sorted(update_files):
+    with open(fpath, 'rb') as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+        file_hashes.append(f"{os.path.basename(fpath)}: {file_hash}")
+
+# 计算文件夹总哈希
+all_data = b''
+for fpath in sorted(update_files):
+    with open(fpath, 'rb') as f:
+        all_data += f.read()
+total_hash = hashlib.sha256(all_data).hexdigest()
+
+print(f"Total files: {len(update_files)}")
+print(f"Total size: {sum(os.path.getsize(f) for f in update_files) / (1024*1024):.1f} MB")
+print(f"Combined SHA256: {total_hash}")
+print(changelog_text)
+
+# 输出到文件供GitHub Actions使用
+with open('firmware_info.txt', 'w') as f:
+    f.write(f"Version: {ver_string_simple}\n")
+    f.write(f"Internal Version: {ver_string_raw}\n")
+    f.write(f"Files: {len(update_files)}\n")
+    f.write(f"Size: {sum(os.path.getsize(fp) for fp in update_files)} bytes\n")
+    f.write(f"Total Hash: {total_hash}\n")
+    f.write(f"Changelog: {changelog_text}\n")
