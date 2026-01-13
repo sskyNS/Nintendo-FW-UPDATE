@@ -211,8 +211,6 @@ jobs:
             该固件已自动从任天堂官方服务器下载、校验并重新打包。
             更新详情：
             ${{ steps.prepare_body.outputs.release_body }}
-            
-            🔧 技术说明：此固件包为原始固件文件的单层打包，无双重压缩，确保为原始 ~340MB 大小。
           files: |
             Firmware.zip
           make_latest: true
