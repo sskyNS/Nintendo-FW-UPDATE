@@ -96,6 +96,7 @@ jobs:
           fi
 
       - name: Execute download script
+        id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           # 清理旧文件
@@ -108,8 +109,14 @@ jobs:
           
           # 提取关键信息
           tail -n 10 firmware_output.txt > changelog_body.txt
+          
+          # 保存固件信息到文件供后续步骤使用
+          if [ -f firmware_info.txt ]; then
+            cp firmware_info.txt firmware_info_step.txt
+          fi
 
       - name: Process firmware files
+        id: process_files
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           echo "=== 处理固件文件 ==="
@@ -138,6 +145,7 @@ jobs:
           # 4. 计算原始大小
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "原始大小: $((ORIGINAL_SIZE / 1024 / 1024)) MB"
+          echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
           # 5. 重新打包（单层压缩）
           echo "正在打包..."
@@ -149,47 +157,76 @@ jobs:
           
           ZIP_SIZE=$(stat -c%s "Firmware.zip")
           echo "ZIP大小: $((ZIP_SIZE / 1024 / 1024)) MB"
+          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           
           # 7. 计算哈希
           echo "计算SHA256..."
           SHA256_HASH=$(sha256sum Firmware.zip | cut -d' ' -f1)
           echo "SHA256: $SHA256_HASH"
-          echo "sha256_hash=$SHA256_HASH" >> $GITHUB_ENV
+          echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
           
           # 8. 清理中间文件
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
-        if: steps.version_check.outputs.update_needed == 'true'
         id: prep_release
+        if: steps.version_check.outputs.update_needed == 'true'
+        env:
+          ZIP_SIZE: ${{ steps.process_files.outputs.zip_size }}
+          SHA256_HASH: ${{ steps.process_files.outputs.sha256_hash }}
+          ORIGINAL_SIZE: ${{ steps.process_files.outputs.original_size }}
         run: |
           # 读取固件信息
-          if [ -f firmware_info.txt ]; then
-            FIRMWARE_SIZE=$(grep 'Size:' firmware_info.txt | cut -d' ' -f2)
-            FIRMWARE_FILES=$(grep 'Files:' firmware_info.txt | cut -d' ' -f2)
-            TOTAL_HASH=$(grep 'Total Hash:' firmware_info.txt | cut -d' ' -f3)
-            CHANGELOG=$(grep -A 1 'Changelog:' firmware_info.txt | tail -n 1 || echo "No changelog available")
+          if [ -f firmware_info_step.txt ]; then
+            FIRMWARE_SIZE=$(grep 'Size:' firmware_info_step.txt | cut -d' ' -f2)
+            FIRMWARE_FILES=$(grep 'Files:' firmware_info_step.txt | cut -d' ' -f2)
+            TOTAL_HASH=$(grep 'Total Hash:' firmware_info_step.txt | cut -d' ' -f3)
+            CHANGELOG=$(grep -A 1 'Changelog:' firmware_info_step.txt | tail -n 1 || echo "No changelog available")
           else
-            FIRMWARE_SIZE="Unknown"
-            FIRMWARE_FILES="Unknown"
-            TOTAL_HASH="Unknown"
-            CHANGELOG=$(tail -n 5 changelog_body.txt || echo "No changelog available")
+            # 尝试从输出文件读取
+            if [ -f firmware_info.txt ]; then
+              FIRMWARE_SIZE=$(grep 'Size:' firmware_info.txt | cut -d' ' -f2)
+              FIRMWARE_FILES=$(grep 'Files:' firmware_info.txt | cut -d' ' -f2)
+              TOTAL_HASH=$(grep 'Total Hash:' firmware_info.txt | cut -d' ' -f3)
+              CHANGELOG=$(grep -A 1 'Changelog:' firmware_info.txt | tail -n 1 || echo "No changelog available")
+            else
+              FIRMWARE_SIZE="$ORIGINAL_SIZE"
+              FIRMWARE_FILES="Unknown"
+              TOTAL_HASH="$SHA256_HASH"
+              CHANGELOG=$(tail -n 5 changelog_body.txt 2>/dev/null || echo "No changelog available")
+            fi
+          fi
+          
+          # 计算MB大小
+          if [[ "$FIRMWARE_SIZE" =~ ^[0-9]+$ ]]; then
+            FIRMWARE_SIZE_MB=$((FIRMWARE_SIZE / 1024 / 1024))
+          else
+            FIRMWARE_SIZE_MB="Unknown"
+          fi
+          
+          if [[ "$ZIP_SIZE" =~ ^[0-9]+$ ]]; then
+            ZIP_SIZE_MB=$((ZIP_SIZE / 1024 / 1024))
+          else
+            ZIP_SIZE_MB="Unknown"
           fi
           
           # 格式化发布内容
           RELEASE_BODY="检测到新版本：${{ steps.version_check.outputs.new_version }}
           
-          该固件已自动从任天堂官方服务器下载、校验并重新打包。
+该固件已自动从任天堂官方服务器下载、校验并重新打包。
+
+📊 固件信息：
+- 文件数量: $FIRMWARE_FILES
+- 原始大小: ${FIRMWARE_SIZE_MB} MB
+- 打包大小: ${ZIP_SIZE_MB} MB
+- 完整性校验: ${TOTAL_HASH}
+- 发布包SHA256: ${SHA256_HASH}
+
+📝 更新详情：
+${CHANGELOG}
+
+🔧 技术说明：此固件包为原始固件文件的单层打包，确保为原始大小。"
           
-          📊 固件信息：
-          - 文件数量: $FIRMWARE_FILES
-          - 原始大小: $((FIRMWARE_SIZE / 1024 / 1024)) MB
-          - 打包大小: $((ZIP_SIZE / 1024 / 1024)) MB
-          - 完整性校验: $TOTAL_HASH
-          - 发布包SHA256: ${{ env.sha256_hash }}
-          
-          📝 更新详情：
-          $CHANGELOG
           echo "release_body<<EOF" >> $GITHUB_OUTPUT
           echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
