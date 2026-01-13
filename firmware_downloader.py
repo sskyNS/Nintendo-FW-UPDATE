@@ -15,6 +15,7 @@ from os.path import basename, exists, join
 from configparser import ConfigParser
 from sys import argv
 from zipfile import ZipFile, ZIP_DEFLATED 
+from datetime import datetime  # 移到顶部
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -220,25 +221,6 @@ def zipdir(src_dir, out_zip):
                 rel  = os.path.relpath(full, start=src_dir) 
                 zf.write(full, arcname=rel)
 
-def get_changelog(url):
-    """
-    Parses the changelog text from the given yls8 report URL.
-    """
-    try:
-        resp = request("GET", url, headers={"User-Agent": user_agent}, verify=False)
-        if resp.status_code == 200:
-            # yls8 reports usually contain "Changelog text" in one cell and the description in the next.
-            # We use regex to extract the content of the cell following "Changelog text".
-            match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', resp.text, re.IGNORECASE | re.DOTALL)
-            if match:
-                text = match.group(1).strip()
-                # Simple cleanup if there are basic HTML tags, though usually it's plain text here
-                text = re.sub(r'<[^>]+>', '', text) 
-                return text
-    except Exception:
-        pass
-    return "Changelog not available or parse failed."
-
 if __name__ == "__main__":
     if not exists("certificat.pem"):
         print("File 'certificat.pem' not found in root directory.")
@@ -326,74 +308,72 @@ if __name__ == "__main__":
     if failed:
         exit(1)
 
-from datetime import datetime
-now = datetime.utcnow()
-
-# 生成当前时间的URL格式，如 "2026-01-13_15-30-00"
-date_str = now.strftime("%Y-%m-%d_%H-%M-%S")
-changelog_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
-
-# 尝试获取更新日志（尝试当前时间和前几小时）
-changelog_text = "Changelog not available."
-for hour_offset in [0, 1, 2, 3, 6, 12, 24]:
-    try:
-        offset_time = now.replace(hour=now.hour - hour_offset)
-        date_str = offset_time.strftime("%Y-%m-%d_%H-%M-%S")
-        test_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
-        
-        resp = request("GET", test_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
-        if resp.status_code == 200:
-            # 尝试多种匹配模式
-            patterns = [
-                r'Changelog text</td>\s*<td[^>]*>(.*?)</td>',
-                r'<td[^>]*>\s*Changelog text\s*</td>\s*<td[^>]*>(.*?)</td>',
-                r'(?:Firmware|System) update.*?changes?[^<]*</td>\s*<td[^>]*>(.*?)</td>',
-            ]
+    # --- 动态获取更新日志 ---
+    now = datetime.utcnow()
+    
+    changelog_text = "Changelog not available."
+    
+    # 尝试当前时间和前几小时
+    for hour_offset in [0, 1, 2, 3, 6, 12, 24]:
+        try:
+            offset_time = now.replace(hour=now.hour - hour_offset)
+            date_str = offset_time.strftime("%Y-%m-%d_%H-%M-%S")
+            test_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
             
-            for pattern in patterns:
-                match = re.search(pattern, resp.text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    text = match.group(1).strip()
-                    text = re.sub(r'<[^>]+>', '', text)
-                    text = re.sub(r'\s+', ' ', text)
-                    if text and len(text) > 10:  # 确保有实际内容
-                        changelog_text = text
-                        changelog_url = test_url
-                        break
-            if changelog_text != "Changelog not available.":
-                break
-    except Exception as e:
-        continue
+            resp = request("GET", test_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+            if resp.status_code == 200:
+                # 尝试多种匹配模式
+                patterns = [
+                    r'Changelog text</td>\s*<td[^>]*>(.*?)</td>',
+                    r'<td[^>]*>\s*Changelog text\s*</td>\s*<td[^>]*>(.*?)</td>',
+                    r'(?:Firmware|System) update.*?changes?[^<]*</td>\s*<td[^>]*>(.*?)</td>',
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, resp.text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        text = match.group(1).strip()
+                        text = re.sub(r'<[^>]+>', '', text)
+                        text = re.sub(r'\s+', ' ', text)
+                        if text and len(text) > 10:  # 确保有实际内容
+                            changelog_text = text
+                            break
+                if changelog_text != "Changelog not available.":
+                    break
+        except Exception as e:
+            continue
 
-# --- FINAL OUTPUT ---
-print(f"SystemVersion NCA FAT: {sv_nca_fat}")
-print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
+    # --- FINAL OUTPUT ---
+    print(f"SystemVersion NCA FAT: {sv_nca_fat}")
+    print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
 
-# 计算哈希值用于验证
-print("Calculating SHA256 hash...")
-file_hashes = []
-for fpath in sorted(update_files):
-    with open(fpath, 'rb') as f:
-        file_hash = hashlib.sha256(f.read()).hexdigest()
-        file_hashes.append(f"{os.path.basename(fpath)}: {file_hash}")
+    # 计算哈希值用于验证
+    print("Calculating SHA256 hash...")
+    
+    # 计算文件夹总哈希和大小
+    all_data = b''
+    total_size = 0
+    for fpath in sorted(update_files):
+        with open(fpath, 'rb') as f:
+            file_data = f.read()
+            all_data += file_data
+            total_size += len(file_data)
+    
+    total_hash = hashlib.sha256(all_data).hexdigest()
 
-# 计算文件夹总哈希
-all_data = b''
-for fpath in sorted(update_files):
-    with open(fpath, 'rb') as f:
-        all_data += f.read()
-total_hash = hashlib.sha256(all_data).hexdigest()
+    print(f"Total files: {len(update_files)}")
+    print(f"Total size: {total_size / (1024*1024):.1f} MB")
+    print(f"Combined SHA256: {total_hash}")
+    print(changelog_text)
 
-print(f"Total files: {len(update_files)}")
-print(f"Total size: {sum(os.path.getsize(f) for f in update_files) / (1024*1024):.1f} MB")
-print(f"Combined SHA256: {total_hash}")
-print(changelog_text)
-
-# 输出到文件供GitHub Actions使用
-with open('firmware_info.txt', 'w') as f:
-    f.write(f"Version: {ver_string_simple}\n")
-    f.write(f"Internal Version: {ver_string_raw}\n")
-    f.write(f"Files: {len(update_files)}\n")
-    f.write(f"Size: {sum(os.path.getsize(fp) for fp in update_files)} bytes\n")
-    f.write(f"Total Hash: {total_hash}\n")
-    f.write(f"Changelog: {changelog_text}\n")
+    # 输出到文件供GitHub Actions使用
+    with open('firmware_info.txt', 'w') as f:
+        f.write(f"Version: {ver_string_simple}\n")
+        f.write(f"Internal Version: {ver_string_raw}\n")
+        f.write(f"Files: {len(update_files)}\n")
+        f.write(f"Size: {total_size}\n")
+        f.write(f"Total Hash: {total_hash}\n")
+        f.write(f"Changelog: {changelog_text}\n")
+    
+    print(f"\nDOWNLOAD COMPLETE. Firmware saved to: {ver_dir}/")
+    print(f"Information saved to: firmware_info.txt")
