@@ -1,4 +1,4 @@
-name:  Firmware Auto Downloader (Fixed)
+name: Firmware Auto Downloader (Fixed)
 
 on:
   schedule:
@@ -142,27 +142,22 @@ jobs:
           
           rm -rf "$FIRMWARE_FOLDER"
 
-- name: Prepare release information
+      - name: Prepare release information
         id: prep_release
         if: steps.version_check.outputs.update_needed == 'true'
         env:
           ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 需要 Token 来查询旧版本信息
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # --- [新增] 计算历史下载量逻辑 ---
           echo "Fetching previous release info..."
-          # 获取旧版本的 JSON 数据
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           
-          # 1. 从旧 Body 中提取历史基数 (格式 <!-- history_downloads:123 -->)
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '(?<=<!-- history_downloads:)[0-9]+' || echo "0")
           
-          # 2. 获取当前 Firmware.zip 的下载次数
           CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '.assets[] | select(.name == "Firmware.zip") | .download_count' 2>/dev/null || echo "0")
           
-          # 3. 计算新的累计总数
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
           echo "Previous History: $HISTORY_BASE, Current Asset: $CURRENT_COUNT, New Total: $NEW_TOTAL_DOWNLOADS"
           # ------------------------------------
@@ -219,7 +214,6 @@ jobs:
             echo "\`\`\`"
             echo "</details>"
             echo ""
-            # [新增] 写入新的历史计数标签
             echo "<!-- history_downloads:$NEW_TOTAL_DOWNLOADS -->"
             echo "EOF"
           } >> $GITHUB_OUTPUT
