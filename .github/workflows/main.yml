@@ -254,10 +254,12 @@ ${CHANGELOG}
 
 🔧 技术说明：此固件包为原始固件文件的单层打包，确保为原始大小。"
           
-          # 修复的EOF语法
-          cat <<EOF >> $GITHUB_OUTPUT
-release_body=$RELEASE_BODY
-EOF
+          # 修复：使用不同的分隔符避免YAML冲突
+          {
+            echo 'release_body<<RELEASE_BODY_EOF'
+            echo "$RELEASE_BODY"
+            echo 'RELEASE_BODY_EOF'
+          } >> $GITHUB_OUTPUT
           
           echo "发布信息准备完成"
 
