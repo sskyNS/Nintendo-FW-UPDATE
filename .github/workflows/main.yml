@@ -91,11 +91,10 @@ jobs:
           EXIT_CODE=$?
           set -e
 
-          if [ $EXIT_CODE -ne 0 ] || [ -z "$CURRENT_RELEASE_VERSION" ]; then
+          if [ -z "$CURRENT_RELEASE_VERSION" ]; then
             CURRENT_RELEASE_VERSION="0.0.0"
           fi
           
-          # 比对版本
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
             echo "INFO: Version match ($NEW_VERSION). No update needed."
             echo "update_needed=false" >> $GITHUB_OUTPUT
@@ -108,96 +107,94 @@ jobs:
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 清理旧文件
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
-          rm -f firmware_info.txt firmware_output.txt firmware_info_step.txt 2>/dev/null || true
+          rm -f firmware_info.txt firmware_output.txt
           
-          # 执行下载脚本
-          echo "开始下载固件..."
-          # 假设脚本名为 firmware_downloader.py
+          echo "Starting Downloader..."
+          # 脚本现在会生成 firmware_info.txt
           python3 firmware_downloader.py | tee firmware_output.txt
-          
-          # 保存固件信息 (提取脚本输出内容用于Changelog)
-          # 这里假设你的 Python 脚本最后输出了相关信息
-          # 简单的 grep 提取方式，防止因 Python 脚本输出格式变化导致失败
-          if [ -f firmware_output.txt ]; then
-             grep "SystemVersion" firmware_output.txt > firmware_info_parsed.txt || true
-          fi
 
       - name: Process firmware files
         id: process_files
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "=== 处理固件文件 ==="
+          echo "=== Processing Files ==="
           
-          # 1. 查找固件文件夹
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
-            echo "::error::未找到固件文件夹！"
-            ls -la
+            echo "::error::Firmware folder not found!"
             exit 1
           fi
           
-          echo "找到文件夹: $FIRMWARE_FOLDER"
-          
-          # 2. 删除 Python 脚本可能生成的 zip (防止嵌套压缩导致双倍大小)
-          rm -f "$FIRMWARE_FOLDER.zip" 2>/dev/null || true
-          rm -f Firmware.zip 2>/dev/null || true
-          
-          # 3. 计算原始大小
+          # 计算原始大小
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
-          # 4. 重新打包（单层压缩 - 关键步骤）
-          # 进入目录再压缩，确保 Zip 根目录下直接是文件，而不是文件夹
-          echo "正在打包..."
+          # 打包 (单层目录结构)
+          echo "Zipping..."
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           
-          # 5. 计算 Zip 大小
+          # 获取 Zip 信息
           ZIP_SIZE=$(stat -c%s "Firmware.zip")
-          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
-          
-          # 6. 计算 SHA256
           SHA256_HASH=$(sha256sum Firmware.zip | cut -d' ' -f1)
+          
+          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
           
-          # 7. 清理
+          # 清理
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
         id: prep_release
         if: steps.version_check.outputs.update_needed == 'true'
         env:
-          ZIP_SIZE: ${{ steps.process_files.outputs.zip_size }}
-          SHA256_HASH: ${{ steps.process_files.outputs.sha256_hash }}
-          ORIGINAL_SIZE: ${{ steps.process_files.outputs.original_size }}
-          NEW_VERSION: ${{ steps.version_check.outputs.new_version }}
+          ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
+          ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
         run: |
-          # 计算 MB 大小
-          FIRMWARE_SIZE_MB=$((ORIGINAL_SIZE / 1024 / 1024))
-          ZIP_SIZE_MB=$((ZIP_SIZE / 1024 / 1024))
-          
-          # 获取 Changelog 内容 (取 firmware_output.txt 最后 15 行)
-          CHANGELOG_CONTENT=$(tail -n 15 firmware_output.txt)
+          # 读取 Python 生成的 info 文件变量
+          if [ -f firmware_info.txt ]; then
+             source firmware_info.txt
+          else
+             # Fallback values
+             VERSION="Unknown"
+             FILES="0"
+             SIZE_BYTES="0"
+             CHANGELOG="Changelog unavailable."
+          fi
 
-          # 直接构建 GITHUB_OUTPUT，避免在 Shell 中定义巨型变量导致 YAML 解析错误
+          # 计算 MB 显示
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
+          ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
+
+          # 构建精简美观的发布页内容
           {
             echo "release_body<<EOF"
-            echo "检测到新版本：${NEW_VERSION}"
+            echo "## 🚀 Firmware $VERSION"
             echo ""
-            echo "该固件已自动从任天堂官方服务器下载、校验并重新打包。"
+            echo "Automatic build from official Nintendo servers."
             echo ""
-            echo "📊 固件信息："
-            echo "- 原始大小: ${FIRMWARE_SIZE_MB} MB"
-            echo "- 打包大小: ${ZIP_SIZE_MB} MB"
-            echo "- 发布包SHA256: ${SHA256_HASH}"
+            echo "### 📦 Build Info"
+            echo "| Property | Value |"
+            echo "| :--- | :--- |"
+            echo "| **File Count** | $FILES |"
+            echo "| **Raw Size** | ${SIZE_MB} MB |"
+            echo "| **Zip Size** | ${ZIP_MB} MB |"
+            echo "| **Zip SHA256** | \`$ZIP_SHA256\` |"
             echo ""
-            echo "📝 详细日志："
-            echo "${CHANGELOG_CONTENT}"
+            echo "### 📝 Changelog"
+            echo "> $CHANGELOG"
             echo ""
-            echo "🔧 技术说明：此固件包为原始固件文件的单层打包（Zip根目录即为nca文件），确保为原始大小。"
+            echo "<details>"
+            echo "<summary>⚙️ Technical Details (SystemVersion)</summary>"
+            echo ""
+            echo "\`\`\`"
+            echo "FAT32: $SYSTEM_VERSION_FAT"
+            echo "exFAT: $SYSTEM_VERSION_EXFAT"
+            echo "Content Hash: $HASH"
+            echo "\`\`\`"
+            echo "</details>"
             echo "EOF"
           } >> $GITHUB_OUTPUT
 
