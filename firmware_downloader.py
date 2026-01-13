@@ -4,7 +4,8 @@
 import os
 import hashlib
 import warnings
-import re  # 新增引用：用于正则解析HTML
+import re
+import html
 from struct import unpack
 from binascii import hexlify
 from glob import glob
@@ -15,7 +16,6 @@ from os.path import basename, exists, join
 from configparser import ConfigParser
 from sys import argv
 from zipfile import ZipFile, ZIP_DEFLATED 
-from datetime import datetime  # 移到顶部
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -30,7 +30,9 @@ warnings.filterwarnings("ignore")
 
 ENV     = "lp1"
 VERSION = argv[1] if len(argv) > 1 else ""
+DEFAULT_CHANGELOG = "General system stability improvements to enhance the user's experience."
 
+# --- Helper Functions (No changes here mostly) ---
 def readdata(f, addr, size):
     f.seek(addr)
     return f.read(size)
@@ -122,16 +124,12 @@ def nin_request(method, url, headers=None):
 
 def parse_cnmt(nca):
     ncaf = basename(nca)
-    
     hactool_bin = "hactool.exe" if os.name == "nt" else "./hactool" 
-    
     cnmt_temp_dir = f"cnmt_tmp_{ncaf}"
-    
     run(
         [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
         stdout=PIPE, stderr=PIPE
     )
-    
     cnmt_file = glob(f"{cnmt_temp_dir}/*.cnmt")[0]
     entries = []
     with open(cnmt_file, "rb") as c:
@@ -154,7 +152,6 @@ def parse_cnmt(nca):
                 h      = c.read(32)
                 nid    = hexify(c.read(16))
                 entries.append((nid, hexify(h)))
-    
     rmtree(cnmt_temp_dir)
     return entries
 
@@ -163,12 +160,9 @@ queued_ncas = set()
 
 def dltitle(title_id, version, is_su=False):
     global update_files, update_dls, sv_nca_fat, sv_nca_exfat, seen_titles, queued_ncas, ver_string_simple
-
     key = (title_id, version, is_su)
-    if key in seen_titles:
-        return
+    if key in seen_titles: return
     seen_titles.add(key)
-
     p = "s" if is_su else "a"
     try:
         cnmt_id = nin_request(
@@ -177,40 +171,29 @@ def dltitle(title_id, version, is_su=False):
         ).headers["X-Nintendo-Content-ID"]
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            print(f"INFO: Title {title_id} version {version} not found (404).")
-            if title_id == "010000000000081B":
-                sv_nca_exfat = ""
+            if title_id == "010000000000081B": sv_nca_exfat = ""
             return
         raise
-
     ver_dir = f"Firmware {ver_string_simple}"
     makedirs(ver_dir, exist_ok=True)
-
     cnmt_nca = f"{ver_dir}/{cnmt_id}.cnmt.nca"
     update_files.append(cnmt_nca)
     dlfile(
         f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/{p}/{cnmt_id}?device_id={device_id}",
         cnmt_nca
     )
-
     if is_su:
-        for t_id, ver in parse_cnmt(cnmt_nca):
-            dltitle(t_id, ver)
+        for t_id, ver in parse_cnmt(cnmt_nca): dltitle(t_id, ver)
     else:
         for nca_id, nca_hash in parse_cnmt(cnmt_nca):
-            if title_id == "0100000000000809":
-                sv_nca_fat = f"{nca_id}.nca"
-            elif title_id == "010000000000081B":
-                sv_nca_exfat = f"{nca_id}.nca"
-
+            if title_id == "0100000000000809": sv_nca_fat = f"{nca_id}.nca"
+            elif title_id == "010000000000081B": sv_nca_exfat = f"{nca_id}.nca"
             if nca_id not in queued_ncas:
                 queued_ncas.add(nca_id)
                 update_files.append(f"{ver_dir}/{nca_id}.nca")
                 update_dls.append((
                     f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/c/{nca_id}?device_id={device_id}",
-                    ver_dir,
-                    f"{nca_id}.nca",
-                    nca_hash
+                    ver_dir, f"{nca_id}.nca", nca_hash
                 ))
 
 def zipdir(src_dir, out_zip):
@@ -221,10 +204,61 @@ def zipdir(src_dir, out_zip):
                 rel  = os.path.relpath(full, start=src_dir) 
                 zf.write(full, arcname=rel)
 
+def get_changelog_robust(version_str):
+    """
+    Fetches the yls8 RSS feed, finds the entry for the current version,
+    extracts the report link, and scrapes the changelog text.
+    """
+    print("Attempting to fetch changelog...")
+    try:
+        # 1. Get RSS Feed
+        rss_url = "https://yls8.mtheall.com/ninupdates/feed.php"
+        rss_resp = request("GET", rss_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if rss_resp.status_code != 200:
+            return DEFAULT_CHANGELOG
+
+        # 2. Find Link for current version (e.g. "Switch 21.2.0")
+        # Pattern: <title>Switch 21.2.0 (bee)</title> ... <link>url</link>
+        # We look for the version string in the content
+        content = rss_resp.text
+        
+        # Simple string search to find the block
+        target_title = f"Switch {version_str}"
+        item_start = content.find(target_title)
+        
+        if item_start == -1:
+            print("Current version not found in RSS feed yet.")
+            return DEFAULT_CHANGELOG
+            
+        # Find the <link> tag after the title
+        link_start = content.find("<link>", item_start)
+        link_end = content.find("</link>", link_start)
+        
+        if link_start == -1 or link_end == -1:
+            return DEFAULT_CHANGELOG
+            
+        report_url = content[link_start+6 : link_end].strip()
+        report_url = html.unescape(report_url) # Decode &amp; to &
+        print(f"Found report URL: {report_url}")
+
+        # 3. Scrape the specific report page
+        report_resp = request("GET", report_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if report_resp.status_code == 200:
+            # Regex to find the cell after "Changelog text"
+            match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                text = re.sub(r'<[^>]+>', '', text) # Remove HTML tags
+                text = re.sub(r'\s+', ' ', text)    # Normalize whitespace
+                if len(text) > 5:
+                    return text
+    except Exception as e:
+        print(f"Changelog fetch error: {e}")
+    
+    return DEFAULT_CHANGELOG
+
 if __name__ == "__main__":
-    if not exists("certificat.pem"):
-        print("File 'certificat.pem' not found in root directory.")
-        exit(1)
+    if not exists("certificat.pem"): exit(1)
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -232,60 +266,41 @@ if __name__ == "__main__":
     cert.save("keys/switch_client.crt", tls.TYPE_PEM)
     priv.save("keys/switch_client.key", tls.TYPE_PEM)
 
-    if not exists("prod.keys"):
-        print("File 'prod.keys' not found in root directory.")
-        exit(1)
-        
+    if not exists("prod.keys"): exit(1)
     prod_keys = ConfigParser(strict=False)
-    with open("prod.keys") as f:
-        prod_keys.read_string("[keys]" + f.read())
+    with open("prod.keys") as f: prod_keys.read_string("[keys]" + f.read())
 
-    if not exists("PRODINFO.bin"):
-        print("File 'PRODINFO.bin' not found in root directory.")
-        exit(1)
-        
+    if not exists("PRODINFO.bin"): exit(1)
     with open("PRODINFO.bin", "rb") as pf:
-        if pf.read(4) != b"CAL0":
-            print("Invalid PRODINFO (invalid header)!")
-            exit(1)
+        if pf.read(4) != b"CAL0": exit(1)
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
-        # print("Device ID:", device_id) # Optional: comment out to reduce noise
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
     if VERSION == "":
-        print("INFO: No version specified, searching for the latest version...")
-        su_meta = nin_request(
-            "GET",
-            f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}"
-        ).json()
+        print("INFO: Searching for latest version...")
+        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
         ver_raw = su_meta["system_update_metas"][0]["title_version"]
-        
         ver_major = ver_raw // 0x4000000
         ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
         ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
         ver_sub2  = ver_raw - ver_major*0x4000000 - ver_minor*0x100000 - ver_sub1*0x10000
-        
         ver_string_raw = f"{ver_major}.{ver_minor}.{ver_sub1}.{str(ver_sub2).zfill(4)}"
         ver_string_simple = f"{ver_major}.{ver_minor}.{ver_sub1}"
     else:
         ver_string_simple = VERSION
-        
         parts = list(map(int, VERSION.split(".")))
-        if len(parts) == 3:
-             parts.append(0) 
-
+        if len(parts) == 3: parts.append(0) 
         ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
         ver_string_raw = f"{parts[0]}.{parts[1]}.{parts[2]}.{str(parts[3]).zfill(4)}"
 
     ver_dir = f"Firmware {ver_string_simple}"
-    print(f"Downloading firmware. Internal version: {ver_string_raw}. Folder: {ver_dir}")
+    print(f"Downloading firmware {ver_string_simple}...")
 
     update_files = []
     update_dls   = []
     sv_nca_fat   = ""
     sv_nca_exfat = ""
-
     seen_titles.clear()
     queued_ncas.clear()
 
@@ -293,64 +308,19 @@ if __name__ == "__main__":
     dlfiles(update_dls)
 
     if not sv_nca_exfat:
-        print("INFO: exFAT not found via meta — direct attempt 010000000000081B…")
         dltitle("010000000000081B", ver_raw, is_su=False)
-        if sv_nca_exfat:
-            dlfiles(update_dls)
-        else:
-            print("INFO: No separate SystemVersion exFAT found for this firmware version.")
+        if sv_nca_exfat: dlfiles(update_dls)
 
     failed = False
     for fpath in update_files:
-        if not exists(fpath):
-            print(f"DOWNLOAD FAILED: {fpath} missing")
-            failed = True
-    if failed:
-        exit(1)
+        if not exists(fpath): failed = True
+    if failed: exit(1)
 
-    # --- 动态获取更新日志 ---
-    now = datetime.utcnow()
-    
-    changelog_text = "Changelog not available."
-    
-    # 尝试当前时间和前几小时
-    for hour_offset in [0, 1, 2, 3, 6, 12, 24]:
-        try:
-            offset_time = now.replace(hour=now.hour - hour_offset)
-            date_str = offset_time.strftime("%Y-%m-%d_%H-%M-%S")
-            test_url = f"https://yls8.mtheall.com/ninupdates/reports.php?date={date_str}&sys=bee"
-            
-            resp = request("GET", test_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
-            if resp.status_code == 200:
-                # 尝试多种匹配模式
-                patterns = [
-                    r'Changelog text</td>\s*<td[^>]*>(.*?)</td>',
-                    r'<td[^>]*>\s*Changelog text\s*</td>\s*<td[^>]*>(.*?)</td>',
-                    r'(?:Firmware|System) update.*?changes?[^<]*</td>\s*<td[^>]*>(.*?)</td>',
-                ]
-                
-                for pattern in patterns:
-                    match = re.search(pattern, resp.text, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        text = match.group(1).strip()
-                        text = re.sub(r'<[^>]+>', '', text)
-                        text = re.sub(r'\s+', ' ', text)
-                        if text and len(text) > 10:  # 确保有实际内容
-                            changelog_text = text
-                            break
-                if changelog_text != "Changelog not available.":
-                    break
-        except Exception as e:
-            continue
+    # --- Fetch Changelog via RSS matching ---
+    changelog_text = get_changelog_robust(ver_string_simple)
 
-    # --- FINAL OUTPUT ---
-    print(f"SystemVersion NCA FAT: {sv_nca_fat}")
-    print(f"SystemVersion NCA exFAT: {sv_nca_exfat}")
-
-    # 计算哈希值用于验证
-    print("Calculating SHA256 hash...")
-    
-    # 计算文件夹总哈希和大小
+    # --- Verification & Stats ---
+    print("Calculating verification data...")
     all_data = b''
     total_size = 0
     for fpath in sorted(update_files):
@@ -361,19 +331,14 @@ if __name__ == "__main__":
     
     total_hash = hashlib.sha256(all_data).hexdigest()
 
-    print(f"Total files: {len(update_files)}")
-    print(f"Total size: {total_size / (1024*1024):.1f} MB")
-    print(f"Combined SHA256: {total_hash}")
-    print(changelog_text)
-
-    # 输出到文件供GitHub Actions使用
+    # --- Save Clean Info for GitHub Actions ---
     with open('firmware_info.txt', 'w') as f:
-        f.write(f"Version: {ver_string_simple}\n")
-        f.write(f"Internal Version: {ver_string_raw}\n")
-        f.write(f"Files: {len(update_files)}\n")
-        f.write(f"Size: {total_size}\n")
-        f.write(f"Total Hash: {total_hash}\n")
-        f.write(f"Changelog: {changelog_text}\n")
-    
-    print(f"\nDOWNLOAD COMPLETE. Firmware saved to: {ver_dir}/")
-    print(f"Information saved to: firmware_info.txt")
+        f.write(f"VERSION={ver_string_simple}\n")
+        f.write(f"FILES={len(update_files)}\n")
+        f.write(f"SIZE_BYTES={total_size}\n")
+        f.write(f"HASH={total_hash}\n")
+        f.write(f"CHANGELOG={changelog_text}\n")
+        f.write(f"SYSTEM_VERSION_FAT={sv_nca_fat}\n")
+        f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
+
+    print(f"Done. Info saved to firmware_info.txt")
