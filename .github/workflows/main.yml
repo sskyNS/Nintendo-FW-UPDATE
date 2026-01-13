@@ -1,8 +1,19 @@
 name: 🎮 Firmware Auto Downloader (Fixed URL)
 
 on:
+  # 1. 每天每小时检查一次
   schedule:
     - cron: '0 * * * *'
+  
+  # 2. 当代码推送到主分支时自动运行 (忽略文档修改)
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+
+  # 3. 允许手动点击按钮强制运行
   workflow_dispatch:
     inputs:
       force_update:
@@ -15,7 +26,7 @@ jobs:
   update_release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # ⚠️ 读写权限用于发布 Release
 
     steps:
       - name: Checkout code
@@ -46,12 +57,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # --- 1. 获取 RSS 最新版本 ---
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
                          head -n 1)
 
           if [ -z "$LATEST_TITLE" ]; then
+            echo "::error::RSS feed error"
             exit 1 
           fi
 
@@ -59,11 +72,15 @@ jobs:
           echo "INFO: RSS Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
+          # --- 2. 强制更新逻辑 (手动 或 代码推送) ---
+          # 如果是手动触发且勾选了Force，或者是代码Push触发，则强制更新
+          if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
+             echo "INFO: Triggered by Manual Force or Code Push. Skipping version check."
              echo "update_needed=true" >> $GITHUB_OUTPUT
              exit 0
           fi
 
+          # --- 3. 获取当前 Release 版本 (定时任务逻辑) ---
           set +e 
           CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           EXIT_CODE=$?
@@ -73,9 +90,12 @@ jobs:
             CURRENT_RELEASE_VERSION="0.0.0"
           fi
           
+          # --- 4. 比对版本 ---
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
+            echo "INFO: Version match ($NEW_VERSION). No update needed."
             echo "update_needed=false" >> $GITHUB_OUTPUT
           else
+            echo "INFO: New version found ($NEW_VERSION vs $CURRENT_RELEASE_VERSION)!"
             echo "update_needed=true" >> $GITHUB_OUTPUT
           fi
         shell: bash
@@ -84,38 +104,29 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           python3 firmware_downloader.py | tee firmware_output.txt
+          
+          # 提取最后 6 行 (包含 DOWNLOAD COMPLETE 和 Hash)
           tail -n 6 firmware_output.txt > changelog_body.txt
 
-      - name: Clean and Re-pack (Fix Size 600MB -> 340MB)
+      - name: Clean and Re-pack (Fix Size)
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "Cleaning up possible duplicate zips..."
-          
-          # 关键修复步骤：
-          # 使用 find 命令递归查找所有 .zip 文件并强制删除
-          # 这确保了无论脚本把 zip 生成在哪里（根目录还是子目录），都会被清除
+          echo "Cleaning up all .zip files..."
+          # 彻底删除所有 zip，防止双重打包导致体积 600MB
           find . -name "*.zip" -type f -delete
           
-          # 找到存放固件文件的目录 (通常是以 Firmware 开头的)
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
-            echo "::error::Firmware folder not found."
+            echo "::error::Firmware folder not found!"
             exit 1
           fi
           
-          echo "Target folder: $FIRMWARE_FOLDER"
-          
-          # 检查文件夹大小（调试用）
-          du -sh "$FIRMWARE_FOLDER"
-          
-          # 重新打包
-          # -r: 递归
-          # -9: 最高压缩比
-          # -q: 安静模式
+          echo "Packing folder: $FIRMWARE_FOLDER"
+          # 重新打包，只包含纯净文件
           zip -r -9 -q Firmware.zip "$FIRMWARE_FOLDER"
           
-          echo "Final Zip Size:"
+          echo "Final size:"
           ls -lh Firmware.zip
 
       - name: Prepare Release Body
