@@ -190,8 +190,6 @@ jobs:
           
           📝 更新详情：
           $CHANGELOG
-        "
-          
           echo "release_body<<EOF" >> $GITHUB_OUTPUT
           echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
