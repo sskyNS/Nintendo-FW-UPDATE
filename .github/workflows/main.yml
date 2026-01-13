@@ -2,8 +2,8 @@ name: 🎮 Firmware Auto Downloader (Fixed URL)
 
 on:
   schedule:
-    - cron: '0 * * * *' # 每小时检查一次
-  workflow_dispatch:    # 允许手动触发
+    - cron: '0 * * * *'
+  workflow_dispatch:
     inputs:
       force_update:
         description: 'Force update'
@@ -15,7 +15,7 @@ jobs:
   update_release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # ⚠️ 必须权限
+      contents: write
 
     steps:
       - name: Checkout code
@@ -46,14 +46,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 获取 RSS 最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
                          head -n 1)
 
           if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::RSS feed error"
             exit 1 
           fi
 
@@ -61,14 +59,11 @@ jobs:
           echo "INFO: RSS Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 2. 强制更新检查
           if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
-             echo "INFO: Force update triggered"
              echo "update_needed=true" >> $GITHUB_OUTPUT
              exit 0
           fi
 
-          # 3. 获取当前 Release 版本
           set +e 
           CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           EXIT_CODE=$?
@@ -78,7 +73,6 @@ jobs:
             CURRENT_RELEASE_VERSION="0.0.0"
           fi
           
-          # 4. 比对
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
             echo "update_needed=false" >> $GITHUB_OUTPUT
           else
@@ -90,26 +84,39 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           python3 firmware_downloader.py | tee firmware_output.txt
-          
-          # 提取最后 6 行 (确保包含 DOWNLOAD COMPLETE! 和哈希值)
-          # 这里的 grep 是为了去掉可能的空行，确保文本紧凑
           tail -n 6 firmware_output.txt > changelog_body.txt
 
-      - name: Clean and Re-pack
+      - name: Clean and Re-pack (Fix Size 600MB -> 340MB)
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          # 删除脚本生成的可能包含冗余数据的 zip
-          rm -f *.zip
+          echo "Cleaning up possible duplicate zips..."
           
-          # 找到文件夹
+          # 关键修复步骤：
+          # 使用 find 命令递归查找所有 .zip 文件并强制删除
+          # 这确保了无论脚本把 zip 生成在哪里（根目录还是子目录），都会被清除
+          find . -name "*.zip" -type f -delete
+          
+          # 找到存放固件文件的目录 (通常是以 Firmware 开头的)
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
+            echo "::error::Firmware folder not found."
             exit 1
           fi
           
-          # 手动重新打包以确保体积正常 (~300MB)
+          echo "Target folder: $FIRMWARE_FOLDER"
+          
+          # 检查文件夹大小（调试用）
+          du -sh "$FIRMWARE_FOLDER"
+          
+          # 重新打包
+          # -r: 递归
+          # -9: 最高压缩比
+          # -q: 安静模式
           zip -r -9 -q Firmware.zip "$FIRMWARE_FOLDER"
+          
+          echo "Final Zip Size:"
+          ls -lh Firmware.zip
 
       - name: Prepare Release Body
         id: prepare_body
@@ -119,7 +126,6 @@ jobs:
           script: |
             const fs = require('fs');
             try {
-              // 读取日志文件，移除首尾空白字符
               const body = fs.readFileSync('changelog_body.txt', 'utf8').trim();
               core.setOutput('release_body', body);
             } catch (error) {
