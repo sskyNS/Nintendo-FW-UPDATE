@@ -245,7 +245,7 @@ ${CHANGELOG}
 
 🔧 技术说明：此固件包为原始固件文件的单层打包，确保为原始大小。"
           
-          echo "release_body<<EOF" >> $GITHUB_OUTPUT
+          echo 'release_body<<EOF' >> $GITHUB_OUTPUT
           echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
           
