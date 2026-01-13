@@ -40,6 +40,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2
 
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+
       - name: Setup hactool
         run: |
           if [ -f "hactool-linux" ]; then
@@ -245,9 +254,10 @@ ${CHANGELOG}
 
 🔧 技术说明：此固件包为原始固件文件的单层打包，确保为原始大小。"
           
-          echo 'release_body<<EOF' >> $GITHUB_OUTPUT
-          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # 修复的EOF语法
+          cat <<EOF >> $GITHUB_OUTPUT
+release_body=$RELEASE_BODY
+EOF
           
           echo "发布信息准备完成"
 
