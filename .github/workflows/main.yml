@@ -2,7 +2,7 @@ name: Firmware Auto Downloader (Fixed)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 * * * *' # 每小时检查一次
   push:
     branches: [ "main", "master" ]
     paths-ignore:
@@ -14,7 +14,7 @@ on:
       force_update:
         description: 'Force update'
         required: false
-        default: true
+        default: false # 默认不强制，只有版本更新才跑
         type: boolean
 
 jobs:
@@ -63,6 +63,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 1. 获取 RSS 上的最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
@@ -74,30 +75,32 @@ jobs:
           fi
 
           NEW_VERSION=$(echo "$LATEST_TITLE" | grep -oP 'Switch \K[0-9.]+')
-          echo "INFO: RSS Version: $NEW_VERSION"
+          echo "INFO: RSS Latest Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
-             echo "INFO: Force update or Push trigger."
-             echo "update_needed=true" >> $GITHUB_OUTPUT
-             exit 0
-          fi
-
+          # 2. 获取当前仓库 Latest Release 的版本号
           set +e 
-          CURRENT_RELEASE_VERSION=$(gh release view latest --json name --jq '.name' 2>/dev/null)
+          CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
 
-          if [ -z "$CURRENT_RELEASE_VERSION" ]; then
-            CURRENT_RELEASE_VERSION="0.0.0"
-          fi
-          
-          if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
-            echo "INFO: Version match ($NEW_VERSION). No update needed."
-            echo "update_needed=false" >> $GITHUB_OUTPUT
+          # 从 "Firmware 17.0.1" 这种格式中提取纯版本号 "17.0.1"
+          CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
+          echo "INFO: Current Release Version: $CURRENT_VERSION"
+
+          # 3. 核心判断逻辑
+          UPDATE_NEEDED="false"
+
+          if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
+            echo "INFO: Manual force update triggered."
+            UPDATE_NEEDED="true"
+          elif [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "INFO: New version detected ($NEW_VERSION vs $CURRENT_VERSION)!"
+            UPDATE_NEEDED="true"
           else
-            echo "INFO: New version found ($NEW_VERSION vs $CURRENT_RELEASE_VERSION)!"
-            echo "update_needed=true" >> $GITHUB_OUTPUT
+            echo "INFO: Version match. No update needed."
           fi
+
+          echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
       - name: Execute download script
         id: download_script
@@ -108,14 +111,14 @@ jobs:
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
-          python3 firmware_downloader.py | tee firmware_output.txt
+          # 传入检测到的新版本号给脚本
+          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
       - name: Process firmware files
         id: process_files
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           echo "=== Processing Files ==="
-          
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
@@ -123,14 +126,10 @@ jobs:
             exit 1
           fi
           
-          echo "Checking file count in folder..."
-          ls -1 "$FIRMWARE_FOLDER" | wc -l
-          
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
           rm -f Firmware.zip
-          
           echo "Zipping..."
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           
@@ -139,7 +138,6 @@ jobs:
           
           echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
-          
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
@@ -150,26 +148,18 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Fetching previous release info..."
+          # 获取历史下载计数逻辑
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
-          
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
-          
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
-          
           CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add' 2>/dev/null || echo "0")
           
           if [ -z "$HISTORY_BASE" ] || [ "$HISTORY_BASE" = "null" ]; then HISTORY_BASE=0; fi
           if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then CURRENT_COUNT=0; fi
-
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
-          echo "Previous History: $HISTORY_BASE, Current Period: $CURRENT_COUNT, New Total: $NEW_TOTAL_DOWNLOADS"
-          # ------------------------------------
 
-          get_val() {
-            grep "^$1=" firmware_info.txt | cut -d'=' -f2-
-          }
-
+          # 读取 Python 脚本生成的信息
+          get_val() { grep "^$1=" firmware_info.txt | cut -d'=' -f2-; }
           if [ -f firmware_info.txt ]; then
              VERSION=$(get_val VERSION)
              FILES=$(get_val FILES)
@@ -178,14 +168,6 @@ jobs:
              CHANGELOG=$(get_val CHANGELOG)
              SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
              SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
-          else
-             VERSION="Unknown"
-             FILES="0"
-             SIZE_BYTES="0"
-             CHANGELOG="Changelog unavailable."
-             HASH="Unknown"
-             SYSTEM_VERSION_FAT="Unknown"
-             SYSTEM_VERSION_EXFAT="Unknown"
           fi
 
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
@@ -229,9 +211,7 @@ jobs:
           tag_name: latest
           name: Firmware ${{ steps.version_check.outputs.new_version }}
           body: ${{ steps.prep_release.outputs.release_body }}
-          files: |
-            Firmware.zip
+          files: Firmware.zip
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
