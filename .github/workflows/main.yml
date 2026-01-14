@@ -157,13 +157,13 @@ jobs:
           
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
           
-          CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '.assets[] | select(.name == "Firmware.zip") | .download_count' 2>/dev/null || echo "0")
+          CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add' 2>/dev/null || echo "0")
           
           if [ -z "$HISTORY_BASE" ] || [ "$HISTORY_BASE" = "null" ]; then HISTORY_BASE=0; fi
           if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then CURRENT_COUNT=0; fi
 
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
-          echo "Previous History: $HISTORY_BASE, Current Asset: $CURRENT_COUNT, New Total: $NEW_TOTAL_DOWNLOADS"
+          echo "Previous History: $HISTORY_BASE, Current Period: $CURRENT_COUNT, New Total: $NEW_TOTAL_DOWNLOADS"
           # ------------------------------------
 
           get_val() {
