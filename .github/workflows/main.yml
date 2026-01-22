@@ -287,36 +287,41 @@ EOF
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
 
-          {
-            echo "release_body<<EOF"
-            echo "## Firmware $VERSION"
-            echo ""
-            echo "Automatic build from official Nintendo servers."
-            echo ""
-            echo "### Build Info"
-            echo "| Property | Value |"
-            echo "| :--- | :--- |"
-            echo "| **File Count** | $FILES |"
-            echo "| **Raw Size** | ${SIZE_MB} MB |"
-            echo "| **Zip Size** | ${ZIP_MB} MB |"
-            echo "| **Zip SHA256** | \`$ZIP_SHA256\` |"
-            echo ""
-            echo "### Changelog"
-            echo "> $CHANGELOG"
-            echo ""
-            echo "<details>"
-            echo "<summary>Technical Details (SystemVersion)</summary>"
-            echo ""
-            echo "\`\`\`"
-            echo "FAT32: $SYSTEM_VERSION_FAT"
-            echo "exFAT: $SYSTEM_VERSION_EXFAT"
-            echo "Content Hash: $HASH"
-            echo "\`\`\`"
-            echo "</details>"
-            echo ""
-            echo "<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
+          # 使用不同的方法来输出多行内容到 GITHUB_OUTPUT
+          RELEASE_BODY=$(cat << EOF
+## Firmware $VERSION
+
+Automatic build from official Nintendo servers.
+
+### Build Info
+| Property | Value |
+| :--- | :--- |
+| **File Count** | $FILES |
+| **Raw Size** | ${SIZE_MB} MB |
+| **Zip Size** | ${ZIP_MB} MB |
+| **Zip SHA256** | \`$ZIP_SHA256\` |
+
+### Changelog
+> $CHANGELOG
+
+<details>
+<summary>Technical Details (SystemVersion)</summary>
+
+\`\`\`
+FAT32: $SYSTEM_VERSION_FAT
+exFAT: $SYSTEM_VERSION_EXFAT
+Content Hash: $HASH
+\`\`\`
+</details>
+
+<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->
+EOF
+          )
+
+          # 将 release_body 写入到 GITHUB_OUTPUT
+          echo "release_body<<__EOF__" >> $GITHUB_OUTPUT
+          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
+          echo "__EOF__" >> $GITHUB_OUTPUT
 
       - name: Create Release
         if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
