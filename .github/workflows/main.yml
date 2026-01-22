@@ -243,7 +243,7 @@ jobs:
           if [ ! -f "firmware_info.txt" ]; then
             echo "::error::firmware_info.txt not found!"
             echo "Creating fallback info..."
-            cat > firmware_info.txt << EOF
+            cat > firmware_info.txt << 'EOF'
 VERSION=${{ steps.version_check.outputs.new_version }}
 FILES=0
 SIZE_BYTES=0
@@ -287,8 +287,10 @@ EOF
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
 
-          # 使用不同的方法来输出多行内容到 GITHUB_OUTPUT
-          RELEASE_BODY=$(cat << EOF
+          # 创建一个临时文件来存储 release_body
+          RELEASE_BODY_FILE=$(mktemp)
+          
+          cat << 'RELEASE_BODY_EOF' > "$RELEASE_BODY_FILE"
 ## Firmware $VERSION
 
 Automatic build from official Nintendo servers.
@@ -315,13 +317,12 @@ Content Hash: $HASH
 </details>
 
 <!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->
-EOF
-          )
+RELEASE_BODY_EOF
 
           # 将 release_body 写入到 GITHUB_OUTPUT
-          echo "release_body<<__EOF__" >> $GITHUB_OUTPUT
-          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
-          echo "__EOF__" >> $GITHUB_OUTPUT
+          echo "release_body<<EOF" >> $GITHUB_OUTPUT
+          cat "$RELEASE_BODY_FILE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
         if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
