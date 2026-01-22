@@ -11,184 +11,177 @@ on:
   workflow_dispatch:
     inputs:
       force_update:
-        description: 'Force update'
+        description: 'Force update firmware'
         required: false
         default: false
         type: boolean
 
 jobs:
-  update_release:
+  update_firmware:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: read
-      pull-requests: read
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Python
+      - name: Setup Python 3.x
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
-          cache: pip
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install System Dependencies
         run: |
+          sudo apt-get update -y
+          sudo apt-get install -y aria2 bc jq gh
           pip install requests anynet beautifulsoup4
-          sudo apt-get update -y && sudo apt-get install -y aria2 bc jq
 
-      - name: Install GitHub CLI
-        run: |
-          type -p curl >/dev/null || (sudo apt update -y && sudo apt install curl -y)
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt update -y && sudo apt install gh -y
-
-      - name: Setup hactool
+      - name: Setup Hactool
         run: |
           if [ -f "hactool-linux" ]; then
-            cp hactool-linux hactool && chmod +x hactool
-            sudo mv hactool /usr/local/bin/
+            chmod +x hactool-linux
+            sudo mv hactool-linux /usr/local/bin/hactool
           else
-            echo "::warning::hactool-linux not found"
+            echo "::warning::hactool-linux not found in repo root!"
           fi
 
-      - name: Check required files
+      - name: Check Required Files
         id: check_files
         run: |
-          MISSING_FILES=""
-          for FILE in certificat.pem prod.keys PRODINFO.bin; do
-            [ ! -f "$FILE" ] && MISSING_FILES+=" $FILE"
+          MISSING=""
+          for f in certificat.pem prod.keys PRODINFO.bin; do
+            [ ! -f "$f" ] && MISSING+="$f "
           done
-          [ ! -f "hactool-linux" ] && [ ! -f "$(which hactool 2>/dev/null)" ] && MISSING_FILES+=" hactool"
-          if [ -n "$MISSING_FILES" ]; then
-            echo "::error::Missing files:$MISSING_FILES"
+          [ ! -x "$(which hactool 2>/dev/null)" ] && MISSING+="hactool "
+          if [ -n "$MISSING" ]; then
             echo "missing_files=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Missing required files: $MISSING"
+            exit 1
           else
             echo "missing_files=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check firmware version
-        id: version_check
+      - name: Get Firmware Versions
+        id: get_versions
         if: steps.check_files.outputs.missing_files == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get latest version from RSS
-          LATEST_TITLE=$(curl -s --connect-timeout 10 'https://yls8.mtheall.com/ninupdates/feed.php' | grep -E '<title>Switch [0-9.]+</title>' | grep -v 'Switch 2' | head -n 1)
-          [ -z "$LATEST_TITLE" ] && { echo "::error::RSS feed error"; exit 1; }
-          NEW_VERSION=$(echo "$LATEST_TITLE" | sed -n 's/.*Switch \([0-9.]\+\).*/\1/p')
-          [ -z "$NEW_VERSION" ] && { echo "::error::Extract version failed"; exit 1; }
-          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          # Get latest official version from RSS
+          RSS_URL="https://yls8.mtheall.com/ninupdates/feed.php"
+          LATEST_VER=$(curl -s --connect-timeout 15 $RSS_URL | grep -E '<title>Switch [0-9.]+</title>' | grep -v 'Switch 2' | head -1 | sed -n 's/.*Switch \([0-9.]\+\).*/\1/p')
+          [ -z "$LATEST_VER" ] && { echo "::error::Failed to get latest firmware version"; exit 1; }
+          echo "latest_ver=$LATEST_VER" >> "$GITHUB_OUTPUT"
 
-          # Get current release version
-          set +e
-          CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
-          set -e
-          CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | sed -n 's/.*Firmware \([0-9.]\+\).*/\1/p' || echo "0.0.0")
+          # Get current release version (fallback to 0.0.0)
+          CURRENT_VER=$(gh release view latest --json name --jq '.name' 2>/dev/null | sed -n 's/.*Firmware \([0-9.]\+\).*/\1/p' || echo "0.0.0")
+          echo "current_ver=$CURRENT_VER" >> "$GITHUB_OUTPUT"
 
-          # Judge update
-          UPDATE_NEEDED="false"
-          if [ "${{ github.event.inputs.force_update == 'true' }}" = "true" ]; then
-            UPDATE_NEEDED="true"
-          elif [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
-            UPDATE_NEEDED="true"
+          # Judge if update is needed
+          if [ "${{ github.event.inputs.force_update }}" = "true" ] || [ "$LATEST_VER" != "$CURRENT_VER" ]; then
+            echo "need_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "need_update=false" >> "$GITHUB_OUTPUT"
+            echo "::info::No update needed, latest version: $LATEST_VER"
           fi
-          echo "update_needed=$UPDATE_NEEDED" >> "$GITHUB_OUTPUT"
 
-      - name: Execute download script
-        id: download_script
-        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
+      - name: Clean Old Files
+        if: steps.get_versions.outputs.need_update == 'true'
         run: |
-          rm -rf "Firmware "* 2>/dev/null
-          rm -f "Firmware "*.zip firmware_info.txt firmware_output.txt 2>/dev/null
-          python firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" 2>&1 | tee firmware_output.txt
+          rm -rf Firmware* 2>/dev/null
+          rm -f firmware_info.txt firmware_output.txt Firmware.zip 2>/dev/null
+
+      - name: Run Download Script
+        if: steps.get_versions.outputs.need_update == 'true'
+        id: download
+        run: |
+          python firmware_downloader.py ${{ steps.get_versions.outputs.latest_ver }} 2>&1 | tee firmware_output.txt
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "::error::Script failed"
-            tail -100 firmware_output.txt
+            echo "::error::Download script failed!"
+            tail -50 firmware_output.txt
             exit 1
           fi
 
-      - name: Process firmware files
-        id: process_files
-        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
+      - name: Locate Firmware Folder
+        if: steps.get_versions.outputs.need_update == 'true'
+        id: locate_folder
         run: |
-          VERSION="${{ steps.version_check.outputs.new_version }}"
-          FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*$VERSION*" | head -n 1)
-          [ -z "$FIRMWARE_FOLDER" ] && FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*[Ff]irmware*" | head -n 1)
-          [ -z "$FIRMWARE_FOLDER" ] && { echo "::error::Firmware folder not found"; exit 1; }
-          [ -z "$(ls -A "$FIRMWARE_FOLDER" 2>/dev/null)" ] && { echo "::error::Folder empty"; exit 1; }
+          VER=${{ steps.get_versions.outputs.latest_ver }}
+          FOLDER=$(find . -maxdepth 2 -type d -name "*$VER*" -o -name "*Firmware*" | head -1)
+          [ -z "$FOLDER" ] && { echo "::error::Firmware folder not found!"; exit 1; }
+          [ -z "$(ls -A $FOLDER 2>/dev/null)" ] && { echo "::error::Firmware folder is empty!"; exit 1; }
+          echo "folder_path=$FOLDER" >> "$GITHUB_OUTPUT"
 
-          # Compress
-          rm -f Firmware.zip 2>/dev/null
-          zip -r9q Firmware.zip "$FIRMWARE_FOLDER/"
-          # Get info
+      - name: Compress Firmware
+        if: steps.get_versions.outputs.need_update == 'true'
+        id: compress
+        run: |
+          FOLDER=${{ steps.locate_folder.outputs.folder_path }}
+          zip -r9q Firmware.zip $FOLDER/
           ZIP_SIZE=$(wc -c < Firmware.zip)
-          SHA256_HASH=$(sha256sum Firmware.zip | awk '{print $1}')
+          SHA256=$(sha256sum Firmware.zip | awk '{print $1}')
           echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
-          echo "sha256_hash=$SHA256_HASH" >> "$GITHUB_OUTPUT"
-          # Clean
-          rm -rf "$FIRMWARE_FOLDER"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          rm -rf $FOLDER
 
-      - name: Prepare release info
-        id: prep_release
-        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
+      - name: Prepare Release Metadata
+        if: steps.get_versions.outputs.need_update == 'true'
+        id: release_meta
         env:
-          ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
-          ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
-          NEW_VERSION: ${{ steps.version_check.outputs.new_version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_VER: ${{ steps.get_versions.outputs.latest_ver }}
+          ZIP_SIZE: ${{ steps.compress.outputs.zip_size }}
+          SHA256: ${{ steps.compress.outputs.sha256 }}
         run: |
-          # Fallback firmware_info.txt
+          # Create fallback info if missing
           if [ ! -f "firmware_info.txt" ]; then
-            cat > firmware_info.txt << EOF
-VERSION=${{ steps.version_check.outputs.new_version }}
+            cat > firmware_info.txt << 'EOF'
+VERSION=${{ steps.get_versions.outputs.latest_ver }}
 FILES=0
 SIZE_BYTES=0
 HASH=unknown
-CHANGELOG=No changelog
+CHANGELOG=Official Nintendo firmware build
 SYSTEM_VERSION_FAT=unknown
 SYSTEM_VERSION_EXFAT=unknown
 EOF
           fi
 
-          # Read info
-          get_val() { grep -E "^$1=" firmware_info.txt | cut -d'=' -f2- | sed 's/^[ \t]*//;s/[ \t]*$//' || echo "unknown"; }
-          VERSION=$(get_val VERSION)
+          # Read info from file
+          get_val() { grep -E "^$1=" firmware_info.txt | cut -d'=' -f2- | sed 's/^ *//;s/ *$//' || echo "unknown"; }
+          VER=$(get_val VERSION)
           FILES=$(get_val FILES)
-          SIZE_BYTES=$(get_val SIZE_BYTES)
-          HASH=$(get_val HASH)
+          RAW_SIZE=$(get_val SIZE_BYTES)
+          CONTENT_HASH=$(get_val HASH)
           CHANGELOG=$(get_val CHANGELOG)
           SYS_FAT=$(get_val SYSTEM_VERSION_FAT)
           SYS_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
 
-          # Calculate size
-          SIZE_MB=$(echo "scale=2; if ($SIZE_BYTES == 0) 0 else $SIZE_BYTES / 1024 / 1024" | bc)
-          ZIP_MB=$(echo "scale=2; if ($ZIP_SIZE_BYTES == 0) 0 else $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
+          # Calculate human-readable size
+          RAW_MB=$(echo "scale=2; $RAW_SIZE / 1024 / 1024" | bc || echo "0.00")
+          ZIP_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc || echo "0.00")
 
-          # Download count
-          PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo '{"body":"<!-- history_downloads: 0 -->","assets":[]}')
-          HISTORY_BASE=$(echo "$PREV_DATA" | jq -r '.body | capture("<!-- history_downloads: (?<num>\\d+) -->").num // 0')
-          CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add // 0')
-          TOTAL=$((HISTORY_BASE + CURRENT_COUNT))
+          # Download count stats
+          PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo '{"body":"<!-- dl:0 -->","assets":[]}')
+          PREV_DL=$(echo "$PREV_DATA" | jq -r '.body | capture("<!-- dl:(\\d+) -->").captures[0].string // 0')
+          CUR_DL=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add // 0')
+          TOTAL_DL=$((PREV_DL + CUR_DL))
 
-          # Build release body (单行写法，彻底解决YAML换行错误)
-          RELEASE_BODY="## Firmware $VERSION\n\nAutomatic build from official Nintendo servers.\n\n### Build Info\n| Property | Value |\n| :--- | :--- |\n| File Count | $FILES |\n| Raw Size | $SIZE_MB MB |\n| Zip Size | $ZIP_MB MB |\n| Zip SHA256 | \`$ZIP_SHA256\` |\n\n### Changelog\n> $CHANGELOG\n\n<details>\n<summary>Technical Details</summary>\n\`\`\`\nFAT32: $SYS_FAT\nexFAT: $SYS_EXFAT\nContent Hash: $HASH\n\`\`\`\n</details>\n\n<!-- history_downloads: $TOTAL -->"
-          
-          # 关键修复：转义后输出到GITHUB_OUTPUT（L172原错误位置）
-          echo "release_body=$(echo -e "$RELEASE_BODY" | sed -e 's/\\/\\\\/g' -e 's/\n/\\n/g' -e 's/"/\\"/g')" >> "$GITHUB_OUTPUT"
+          # Build release body (原生单行，无任何转义)
+          echo "release_body=## Firmware $VER%0A%0AAutomatic build from official Nintendo servers.%0A%0A### Build Information%0A| Property | Value |%0A| :--- | :--- |%0A| File Count | $FILES |%0A| Raw Size | $RAW_MB MB |%0A| Compressed Size | $ZIP_MB MB |%0A| ZIP SHA256 | \`$SHA256\` |%0A%0A### Changelog%0A> $CHANGELOG%0A%0A<details>%0A<summary>Technical Details</summary>%0A%0A\`\`\`%0AFAT32 System Version: $SYS_FAT%0AexFAT System Version: $SYS_EXFAT%0AContent Hash: $CONTENT_HASH%0A\`\`\`%0A</details>%0A%0A<!-- dl:$TOTAL_DL -->" >> "$GITHUB_OUTPUT"
+          echo "release_name=Firmware $VER" >> "$GITHUB_OUTPUT"
+          echo "tag_name=firmware-$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Create Release
-        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
+      - name: Create GitHub Release
+        if: steps.get_versions.outputs.need_update == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "firmware-${{ steps.version_check.outputs.new_version }}"
-          name: Firmware ${{ steps.version_check.outputs.new_version }}
-          body: ${{ steps.prep_release.outputs.release_body }}
+          tag_name: ${{ steps.release_meta.outputs.tag_name }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          body: ${{ steps.release_meta.outputs.release_body }}
           files: Firmware.zip
           make_latest: true
         env:
