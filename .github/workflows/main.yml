@@ -14,7 +14,7 @@ on:
       force_update:
         description: 'Force update'
         required: false
-        default: false
+        default: false # 默认不强制，只有版本更新才跑
         type: boolean
 
 jobs:
@@ -32,17 +32,17 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.x'
       
       - name: Install dependencies
         run: |
           pip install requests anynet beautifulsoup4
           sudo apt-get update
-          sudo apt-get install -y aria2 curl wget
+          sudo apt-get install -y aria2
 
       - name: Install GitHub CLI
         run: |
-          type -p curl >/dev/null || sudo apt install curl -y
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
           curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
           && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
           && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
@@ -51,32 +51,12 @@ jobs:
 
       - name: Setup hactool
         run: |
-          if [ ! -f "hactool" ] && [ -f "hactool-linux" ]; then
+          if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool
             chmod +x hactool
-            echo "hactool setup complete"
           else
-            echo "hactool already exists or hactool-linux not found"
+            echo "::warning::hactool-linux not found"
           fi
-
-      - name: Check required files
-        run: |
-          echo "Checking required files..."
-          ls -la
-          echo "---"
-          if [ ! -f "prod.keys" ]; then
-            echo "::error::prod.keys not found!"
-            exit 1
-          fi
-          if [ ! -f "PRODINFO.bin" ]; then
-            echo "::error::PRODINFO.bin not found!"
-            exit 1
-          fi
-          if [ ! -f "certificat.pem" ]; then
-            echo "::error::certificat.pem not found!"
-            exit 1
-          fi
-          echo "All required files found"
 
       - name: Check firmware version
         id: version_check
@@ -84,40 +64,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 1. 获取 RSS 上的最新版本
-          echo "Fetching RSS feed..."
-          RSS_CONTENT=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
-          
-          if [ -z "$RSS_CONTENT" ]; then
-            echo "::error::Failed to fetch RSS feed"
-            exit 1 
-          fi
-          
-          LATEST_TITLE=$(echo "$RSS_CONTENT" | \
-                         grep -o '<title>Switch [0-9]\+\.[0-9]\+\.[0-9]\+' | \
+          LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
+                         grep '<title>Switch ' | \
+                         grep -v '<title>Switch 2 ' | \
                          head -n 1)
-          
+
           if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::No firmware title found in RSS"
+            echo "::error::RSS feed error"
             exit 1 
           fi
 
           NEW_VERSION=$(echo "$LATEST_TITLE" | grep -oP 'Switch \K[0-9.]+')
-          echo "RSS Latest Version: $NEW_VERSION"
+          echo "INFO: RSS Latest Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
           # 2. 获取当前仓库 Latest Release 的版本号
-          CURRENT_VERSION="0.0.0"
           set +e 
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
-          
-          if [ $? -eq 0 ] && [ -n "$CURRENT_RELEASE_NAME" ]; then
-            # 从 "Firmware 17.0.1" 这种格式中提取纯版本号 "17.0.1"
-            CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+')
-          fi
           set -e
-          
-          echo "Current Release Version: $CURRENT_VERSION"
-          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          # 从 "Firmware 17.0.1" 这种格式中提取纯版本号 "17.0.1"
+          CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
+          echo "INFO: Current Release Version: $CURRENT_VERSION"
 
           # 3. 核心判断逻辑
           UPDATE_NEEDED="false"
@@ -133,109 +101,44 @@ jobs:
           fi
 
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
-          echo "update_needed=$UPDATE_NEEDED"
 
       - name: Execute download script
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
-          echo "Cleaning up old files..."
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
-          rm -f firmware_info.txt firmware_output.txt 2>/dev/null || true
+          rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
-          echo "Version to download: ${{ steps.version_check.outputs.new_version }}"
-          
-          # 运行下载脚本，捕获输出
-          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" 2>&1 | tee firmware_output.txt
-          
-          # 检查脚本是否成功执行
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "::error::Download script failed!"
-            cat firmware_output.txt
-            exit 1
-          fi
-          
-          echo "Download script completed"
-          
-          # 检查是否生成了 firmware_info.txt
-          if [ ! -f "firmware_info.txt" ]; then
-            echo "::error::firmware_info.txt not generated!"
-            exit 1
-          fi
-          
-          echo "firmware_info.txt content:"
-          cat firmware_info.txt
-          
-          # 检查是否创建了 Firmware 文件夹
-          FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
-          if [ -z "$FIRMWARE_FOLDER" ]; then
-            echo "::warning::Firmware folder not created by script. Checking for alternative..."
-            # 尝试从 firmware_info.txt 获取版本号并检查文件夹
-            VERSION=$(grep "^VERSION=" firmware_info.txt | cut -d'=' -f2)
-            if [ -n "$VERSION" ] && [ -d "Firmware $VERSION" ]; then
-              FIRMWARE_FOLDER="Firmware $VERSION"
-              echo "Found folder: $FIRMWARE_FOLDER"
-            else
-              echo "::error::No Firmware folder found!"
-              exit 1
-            fi
-          fi
-          
-          echo "Found firmware folder: $FIRMWARE_FOLDER"
-          echo "folder_name=$FIRMWARE_FOLDER" >> $GITHUB_OUTPUT
+          # 传入检测到的新版本号给脚本
+          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
       - name: Process firmware files
         id: process_files
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           echo "=== Processing Files ==="
-          
-          # 首先尝试从上一步的输出获取文件夹名
-          if [ -n "${{ steps.download_script.outputs.folder_name }}" ]; then
-            FIRMWARE_FOLDER="${{ steps.download_script.outputs.folder_name }}"
-          else
-            # 如果没有，则尝试查找
-            FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
-          fi
+          FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
             echo "::error::Firmware folder not found!"
-            echo "Current directory contents:"
-            ls -la
             exit 1
           fi
-          
-          echo "Processing folder: $FIRMWARE_FOLDER"
-          
-          # 检查文件夹内容
-          echo "Folder contents:"
-          ls -la "$FIRMWARE_FOLDER/" | head -20
           
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           echo "original_size=$ORIGINAL_SIZE" >> $GITHUB_OUTPUT
           
-          rm -f Firmware.zip 2>/dev/null || true
-          echo "Zipping firmware files..."
-          
-          # 使用绝对路径进行压缩
+          rm -f Firmware.zip
+          echo "Zipping..."
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
-          
-          if [ ! -f "Firmware.zip" ]; then
-            echo "::error::Failed to create Firmware.zip!"
-            exit 1
-          fi
           
           ZIP_SIZE=$(stat -c%s "Firmware.zip")
           SHA256_HASH=$(sha256sum Firmware.zip | cut -d' ' -f1)
           
-          echo "Zip file created: Firmware.zip"
-          echo "Zip size: $ZIP_SIZE bytes"
-          echo "SHA256: $SHA256_HASH"
-          
           echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
+          rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
         id: prep_release
@@ -245,106 +148,61 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Preparing Release Information ==="
+          # 获取历史下载计数逻辑
+          PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
+          OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
+          HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
+          CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add' 2>/dev/null || echo "0")
           
-          # 读取 firmware_info.txt 中的信息
-          if [ ! -f "firmware_info.txt" ]; then
-            echo "::error::firmware_info.txt not found!"
-            exit 1
-          fi
-          
-          # 定义函数读取值
-          get_val() { 
-            if grep -q "^$1=" firmware_info.txt; then
-              grep "^$1=" firmware_info.txt | cut -d'=' -f2-
-            else
-              echo ""
-            fi
-          }
-          
-          VERSION=$(get_val VERSION)
-          FILES=$(get_val FILES)
-          SIZE_BYTES=$(get_val SIZE_BYTES)
-          HASH=$(get_val HASH)
-          CHANGELOG=$(get_val CHANGELOG)
-          SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
-          SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
-          
-          # 设置默认值
-          if [ -z "$VERSION" ]; then
-            VERSION="${{ steps.version_check.outputs.new_version }}"
-          fi
-          if [ -z "$FILES" ]; then
-            FILES="Unknown"
-          fi
-          if [ -z "$SIZE_BYTES" ]; then
-            SIZE_BYTES="${{ steps.process_files.outputs.original_size }}"
-          fi
-          if [ -z "$CHANGELOG" ]; then
-            CHANGELOG="General system stability improvements to enhance the user's experience."
-          fi
-          
-          # 获取历史下载计数
-          HISTORY_BASE=0
-          CURRENT_COUNT=0
-          set +e
-          PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null)
-          if [ $? -eq 0 ]; then
-            OLD_BODY=$(echo "$PREV_DATA" | jq -r '.body // empty')
-            if [ -n "$OLD_BODY" ]; then
-              HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
-            fi
-            CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add // 0' 2>/dev/null || echo "0")
-          fi
-          set -e
-          
-          if [ -z "$HISTORY_BASE" ] || [ "$HISTORY_BASE" = "null" ]; then
-            HISTORY_BASE=0
-          fi
-          if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then
-            CURRENT_COUNT=0
-          fi
-          
+          if [ -z "$HISTORY_BASE" ] || [ "$HISTORY_BASE" = "null" ]; then HISTORY_BASE=0; fi
+          if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then CURRENT_COUNT=0; fi
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
-          
-          # 计算文件大小（MB）
+
+          # 读取 Python 脚本生成的信息
+          get_val() { grep "^$1=" firmware_info.txt | cut -d'=' -f2-; }
+          if [ -f firmware_info.txt ]; then
+             VERSION=$(get_val VERSION)
+             FILES=$(get_val FILES)
+             SIZE_BYTES=$(get_val SIZE_BYTES)
+             HASH=$(get_val HASH)
+             CHANGELOG=$(get_val CHANGELOG)
+             SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
+             SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
+          fi
+
           SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
-          
-          # 创建 release body
-          RELEASE_BODY=$(cat << EOF
-## Firmware $VERSION
 
-Automatic build from official Nintendo servers.
-
-### Build Info
-| Property | Value |
-| :--- | :--- |
-| **File Count** | $FILES |
-| **Raw Size** | ${SIZE_MB} MB |
-| **Zip Size** | ${ZIP_MB} MB |
-| **Zip SHA256** | \`$ZIP_SHA256\` |
-
-### Changelog
-> $CHANGELOG
-
-<details>
-<summary>Technical Details (SystemVersion)</summary>
-
-\`\`\`
-FAT32: $SYSTEM_VERSION_FAT
-exFAT: $SYSTEM_VERSION_EXFAT
-Content Hash: $HASH
-\`\`\`
-</details>
-
-<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->
-EOF
-)
-          
-          echo "release_body<<EOF" >> $GITHUB_OUTPUT
-          echo "$RELEASE_BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "release_body<<EOF"
+            echo "## Firmware $VERSION"
+            echo ""
+            echo "Automatic build from official Nintendo servers."
+            echo ""
+            echo "### Build Info"
+            echo "| Property | Value |"
+            echo "| :--- | :--- |"
+            echo "| **File Count** | $FILES |"
+            echo "| **Raw Size** | ${SIZE_MB} MB |"
+            echo "| **Zip Size** | ${ZIP_MB} MB |"
+            echo "| **Zip SHA256** | \`$ZIP_SHA256\` |"
+            echo ""
+            echo "### Changelog"
+            echo "> $CHANGELOG"
+            echo ""
+            echo "<details>"
+            echo "<summary>Technical Details (SystemVersion)</summary>"
+            echo ""
+            echo "\`\`\`"
+            echo "FAT32: $SYSTEM_VERSION_FAT"
+            echo "exFAT: $SYSTEM_VERSION_EXFAT"
+            echo "Content Hash: $HASH"
+            echo "\`\`\`"
+            echo "</details>"
+            echo ""
+            echo "<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Create Release
         if: steps.version_check.outputs.update_needed == 'true'
@@ -355,7 +213,5 @@ EOF
           body: ${{ steps.prep_release.outputs.release_body }}
           files: Firmware.zip
           make_latest: true
-          prerelease: false
-          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
