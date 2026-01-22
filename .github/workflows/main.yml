@@ -58,8 +58,39 @@ jobs:
             echo "::warning::hactool-linux not found"
           fi
 
+      - name: Check if required files exist
+        id: check_files
+        run: |
+          echo "Checking for required files..."
+          MISSING_FILES=""
+          
+          if [ ! -f "certificat.pem" ]; then
+            MISSING_FILES="$MISSING_FILES certificat.pem"
+          fi
+          
+          if [ ! -f "prod.keys" ]; then
+            MISSING_FILES="$MISSING_FILES prod.keys"
+          fi
+          
+          if [ ! -f "PRODINFO.bin" ]; then
+            MISSING_FILES="$MISSING_FILES PRODINFO.bin"
+          fi
+          
+          if [ ! -f "hactool-linux" ] && [ ! -f "hactool" ]; then
+            MISSING_FILES="$MISSING_FILES hactool"
+          fi
+          
+          if [ -n "$MISSING_FILES" ]; then
+            echo "::error::Missing required files:$MISSING_FILES"
+            echo "missing_files=true" >> $GITHUB_OUTPUT
+          else
+            echo "All required files found."
+            echo "missing_files=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Check firmware version
         id: version_check
+        if: steps.check_files.outputs.missing_files == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -104,25 +135,84 @@ jobs:
 
       - name: Execute download script
         id: download_script
-        if: steps.version_check.outputs.update_needed == 'true'
+        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         run: |
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
+          echo "Current directory contents before script:"
+          ls -la
+          echo ""
+          
           # 传入检测到的新版本号给脚本
-          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
+          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" 2>&1 | tee firmware_output.txt
+          
+          # 检查脚本退出状态
+          SCRIPT_EXIT_CODE=${PIPESTATUS[0]}
+          if [ $SCRIPT_EXIT_CODE -ne 0 ]; then
+            echo "::error::Python script failed with exit code $SCRIPT_EXIT_CODE"
+            echo "Script output (last 100 lines):"
+            tail -100 firmware_output.txt
+            exit 1
+          fi
+
+      - name: Debug - Check script output
+        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
+        run: |
+          echo "=== Script Output (summary) ==="
+          tail -50 firmware_output.txt 2>/dev/null || echo "No output file found"
+          echo ""
+          echo "=== Current directory after script ==="
+          ls -la
+          echo ""
+          echo "=== Looking for firmware folders ==="
+          find . -maxdepth 2 -type d -name "*" | grep -i firmware | sed 's/^/  /'
+          echo ""
+          echo "=== All directories ==="
+          find . -maxdepth 2 -type d | sed 's/^/  /'
 
       - name: Process firmware files
         id: process_files
-        if: steps.version_check.outputs.update_needed == 'true'
+        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         run: |
           echo "=== Processing Files ==="
-          FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
+          
+          # 查找文件夹的多种方式
+          FIRMWARE_FOLDER=""
+          
+          # 方法1: 查找所有包含 firmware 的文件夹（不区分大小写）
+          FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*[Ff]irmware*" | head -n 1)
+          
+          # 方法2: 如果没有找到，查找包含版本号的文件夹
+          if [ -z "$FIRMWARE_FOLDER" ]; then
+            VERSION="${{ steps.version_check.outputs.new_version }}"
+            FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*$VERSION*" | head -n 1)
+          fi
+          
+          # 方法3: 查找最近创建的文件夹
+          if [ -z "$FIRMWARE_FOLDER" ]; then
+            FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -printf "%T@ %p\n" | sort -nr | head -n 1 | cut -d' ' -f2-)
+          fi
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
             echo "::error::Firmware folder not found!"
+            echo "DEBUG: Listing all files and directories:"
+            find . -maxdepth 2 -type f -o -type d | sort
+            echo ""
+            echo "DEBUG: Full Python script output:"
+            cat firmware_output.txt 2>/dev/null || echo "No output file"
+            exit 1
+          fi
+          
+          echo "Found firmware folder: $FIRMWARE_FOLDER"
+          echo "Folder contents:"
+          ls -la "$FIRMWARE_FOLDER/" 2>/dev/null || echo "Cannot list folder contents"
+          
+          # 检查文件夹是否为空
+          if [ -z "$(ls -A "$FIRMWARE_FOLDER" 2>/dev/null)" ]; then
+            echo "::error::Firmware folder is empty!"
             exit 1
           fi
           
@@ -138,16 +228,32 @@ jobs:
           
           echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           echo "sha256_hash=$SHA256_HASH" >> $GITHUB_OUTPUT
+          echo "Deleting original folder..."
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
         id: prep_release
-        if: steps.version_check.outputs.update_needed == 'true'
+        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         env:
           ZIP_SIZE_BYTES: ${{ steps.process_files.outputs.zip_size }}
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 检查 firmware_info.txt 是否存在
+          if [ ! -f "firmware_info.txt" ]; then
+            echo "::error::firmware_info.txt not found!"
+            echo "Creating fallback info..."
+            cat > firmware_info.txt << EOF
+VERSION=${{ steps.version_check.outputs.new_version }}
+FILES=0
+SIZE_BYTES=0
+HASH=unknown
+CHANGELOG=Download failed or incomplete
+SYSTEM_VERSION_FAT=unknown
+SYSTEM_VERSION_EXFAT=unknown
+EOF
+          fi
+          
           # 获取历史下载计数逻辑
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
@@ -161,17 +267,25 @@ jobs:
           # 读取 Python 脚本生成的信息
           get_val() { grep "^$1=" firmware_info.txt | cut -d'=' -f2-; }
           if [ -f firmware_info.txt ]; then
-             VERSION=$(get_val VERSION)
-             FILES=$(get_val FILES)
-             SIZE_BYTES=$(get_val SIZE_BYTES)
-             HASH=$(get_val HASH)
-             CHANGELOG=$(get_val CHANGELOG)
-             SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
-             SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
+            VERSION=$(get_val VERSION)
+            FILES=$(get_val FILES)
+            SIZE_BYTES=$(get_val SIZE_BYTES)
+            HASH=$(get_val HASH)
+            CHANGELOG=$(get_val CHANGELOG)
+            SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
+            SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
+          else
+            VERSION="${{ steps.version_check.outputs.new_version }}"
+            FILES="unknown"
+            SIZE_BYTES=0
+            HASH="unknown"
+            CHANGELOG="Download failed or incomplete"
+            SYSTEM_VERSION_FAT="unknown"
+            SYSTEM_VERSION_EXFAT="unknown"
           fi
 
-          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
-          ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
+          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
+          ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc || echo "0.00")
 
           {
             echo "release_body<<EOF"
@@ -205,7 +319,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Create Release
-        if: steps.version_check.outputs.update_needed == 'true'
+        if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
