@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: read # 补充gh cli必要权限
+      packages: read
       pull-requests: read
 
     steps:
@@ -35,12 +35,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-          cache: 'pip' # 缓存依赖加速
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           pip install requests anynet beautifulsoup4
-          sudo apt-get update -y && sudo apt-get install -y aria2 bc jq # 补充bc/jq（原脚本缺失）
+          sudo apt-get update -y && sudo apt-get install -y aria2 bc jq
 
       - name: Install GitHub CLI
         run: |
@@ -54,7 +54,7 @@ jobs:
         run: |
           if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool && chmod +x hactool
-            sudo mv hactool /usr/local/bin/ # 加入系统PATH，避免找不到
+            sudo mv hactool /usr/local/bin/
           else
             echo "::warning::hactool-linux not found"
           fi
@@ -64,12 +64,10 @@ jobs:
         run: |
           echo "Checking for required files..."
           MISSING_FILES=""
-          
           for FILE in certificat.pem prod.keys PRODINFO.bin; do
             [ ! -f "$FILE" ] && MISSING_FILES+=" $FILE"
           done
           [ ! -f "hactool-linux" ] && [ ! -f "$(which hactool 2>/dev/null)" ] && MISSING_FILES+=" hactool"
-          
           if [ -n "$MISSING_FILES" ]; then
             echo "::error::Missing required files:$MISSING_FILES"
             echo "missing_files=true" >> "$GITHUB_OUTPUT"
@@ -84,7 +82,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 获取RSS最新版本（修复grep匹配，增加容错）
           LATEST_TITLE=$(curl -s --connect-timeout 10 'https://yls8.mtheall.com/ninupdates/feed.php' | grep -E '<title>Switch [0-9.]+</title>' | grep -v 'Switch 2' | head -n 1)
           [ -z "$LATEST_TITLE" ] && { echo "::error::RSS feed request failed or no data"; exit 1; }
           NEW_VERSION=$(echo "$LATEST_TITLE" | sed -n 's/.*Switch \([0-9.]\+\).*/\1/p')
@@ -92,14 +89,12 @@ jobs:
           echo "INFO: RSS Latest Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-          # 2. 获取当前Latest Release版本（兜底首次运行无Release的情况）
           set +e
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
           CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | sed -n 's/.*Firmware \([0-9.]\+\).*/\1/p' || echo "0.0.0")
           echo "INFO: Current Release Version: $CURRENT_VERSION"
 
-          # 3. 升级判断逻辑（修复workflow_dispatch参数判断）
           UPDATE_NEEDED="false"
           if [ "${{ github.event.inputs.force_update == 'true' }}" = "true" ]; then
             echo "INFO: Manual force update triggered."
@@ -116,16 +111,11 @@ jobs:
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         run: |
-          # 清理旧文件（增加容错）
           rm -rf "Firmware "* 2>/dev/null
           rm -f "Firmware "*.zip firmware_info.txt firmware_output.txt 2>/dev/null
-          
           echo "Starting Downloader... Current dir: $(pwd)"
           ls -la
-          # 执行下载脚本（传递版本号，强制Python3）
           python firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" 2>&1 | tee firmware_output.txt
-          
-          # 检查脚本退出码（修复PIPESTATUS兼容）
           if [ ${PIPESTATUS[0]} -ne 0 ]; then
             echo "::error::Python download script failed (exit code: ${PIPESTATUS[0]})"
             tail -100 firmware_output.txt
@@ -149,32 +139,22 @@ jobs:
           echo "=== Processing Firmware Files ==="
           FIRMWARE_FOLDER=""
           VERSION="${{ steps.version_check.outputs.new_version }}"
-          
-          # 优先匹配版本号文件夹，再匹配Firmware文件夹（修复查找逻辑）
           FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*$VERSION*" | head -n 1)
           [ -z "$FIRMWARE_FOLDER" ] && FIRMWARE_FOLDER=$(find . -maxdepth 2 -type d -name "*[Ff]irmware*" | head -n 1)
           [ -z "$FIRMWARE_FOLDER" ] && { echo "::error::Firmware folder not found!"; find . -maxdepth 2 -type d; exit 1; }
-          
           echo "Found firmware folder: $FIRMWARE_FOLDER"
           ls -la "$FIRMWARE_FOLDER/" || { echo "::error::Cannot list firmware folder"; exit 1; }
-          # 检查文件夹非空
           [ -z "$(ls -A "$FIRMWARE_FOLDER" 2>/dev/null)" ] && { echo "::error::Firmware folder is empty!"; exit 1; }
           
-          # 计算原文件夹大小，压缩（修复zip递归）
           ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           rm -f Firmware.zip 2>/dev/null
-          zip -r9q Firmware.zip "$FIRMWARE_FOLDER/" # 递归压缩，最高压缩比
+          zip -r9q Firmware.zip "$FIRMWARE_FOLDER/"
           
-          # 获取压缩包信息（修复stat兼容）
           ZIP_SIZE=$(wc -c < Firmware.zip)
           SHA256_HASH=$(sha256sum Firmware.zip | awk '{print $1}')
-          
-          # 输出到GITHUB_OUTPUT
           echo "original_size=$ORIGINAL_SIZE" >> "$GITHUB_OUTPUT"
           echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
           echo "sha256_hash=$SHA256_HASH" >> "$GITHUB_OUTPUT"
-          
-          # 清理原文件夹
           rm -rf "$FIRMWARE_FOLDER"
 
       - name: Prepare release information
@@ -186,7 +166,6 @@ jobs:
           NEW_VERSION: ${{ steps.version_check.outputs.new_version }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 兜底firmware_info.txt（修复文件不存在的情况）
           if [ ! -f "firmware_info.txt" ]; then
             echo "::warning::firmware_info.txt not found, creating fallback"
             cat > firmware_info.txt << EOF
@@ -200,7 +179,6 @@ SYSTEM_VERSION_EXFAT=unknown
 EOF
           fi
 
-          # 读取固件信息（增加容错，默认值）
           get_val() { grep -E "^$1=" firmware_info.txt | cut -d'=' -f2- | sed 's/^[ \t]*//;s/[ \t]*$//' || echo "unknown"; }
           VERSION=$(get_val VERSION)
           FILES=$(get_val FILES)
@@ -210,59 +188,28 @@ EOF
           SYSTEM_VERSION_FAT=$(get_val SYSTEM_VERSION_FAT)
           SYSTEM_VERSION_EXFAT=$(get_val SYSTEM_VERSION_EXFAT)
 
-          # 计算大小（MB，修复bc空值）
           SIZE_MB=$(echo "scale=2; if ($SIZE_BYTES == 0) 0 else $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; if ($ZIP_SIZE_BYTES == 0) 0 else $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
 
-          # 历史下载量统计（兜底首次运行无Release）
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo '{"body":"<!-- history_downloads: 0 -->","assets":[]}')
           HISTORY_BASE=$(echo "$PREV_DATA" | jq -r '.body | capture("<!-- history_downloads: (?<num>\\d+) -->").num // 0')
           CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add // 0')
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
 
-          # 构建Release Body（修复变量替换，改用printf）
-          RELEASE_BODY=$(cat << EOF
-## Firmware $VERSION
-
-Automatic build from official Nintendo servers.
-
-### Build Info
-| Property | Value |
-| :--- | :--- |
-| **File Count** | $FILES |
-| **Raw Size** | $SIZE_MB MB |
-| **Zip Size** | $ZIP_MB MB |
-| **Zip SHA256** | \`$ZIP_SHA256\` |
-
-### Changelog
-> $CHANGELOG
-
-<details>
-<summary>Technical Details (SystemVersion)</summary>
-
-\`\`\`
-FAT32: $SYSTEM_VERSION_FAT
-exFAT: $SYSTEM_VERSION_EXFAT
-Content Hash: $HASH
-\`\`\`
-</details>
-
-<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->
-EOF
-          )
-          # 输出到GITHUB_OUTPUT（多行兼容）
-          echo "release_body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$RELEASE_BODY" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          # 重构Release Body写法，彻底解决YAML换行/插值错误
+          RELEASE_BODY="## Firmware $VERSION\n\nAutomatic build from official Nintendo servers.\n\n### Build Info\n| Property | Value |\n| :--- | :--- |\n| **File Count** | $FILES |\n| **Raw Size** | $SIZE_MB MB |\n| **Zip Size** | $ZIP_MB MB |\n| **Zip SHA256** | \`$ZIP_SHA256\` |\n\n### Changelog\n> $CHANGELOG\n\n<details>\n<summary>Technical Details (SystemVersion)</summary>\n\n\`\`\`\nFAT32: $SYSTEM_VERSION_FAT\nexFAT: $SYSTEM_VERSION_EXFAT\nContent Hash: $HASH\n\`\`\`\n</details>\n\n<!-- history_downloads: $NEW_TOTAL_DOWNLOADS -->"
+          
+          # 转义换行并输出到GITHUB_OUTPUT
+          echo "release_body=$(echo -e "$RELEASE_BODY" | sed -e 's/\\/\\\\/g' -e 's/\n/\\n/g' -e 's/"/\\"/g')" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         if: steps.version_check.outputs.update_needed == 'true' && steps.check_files.outputs.missing_files == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "firmware-${{ steps.version_check.outputs.new_version }}" # 新增版本标签，避免覆盖latest
+          tag_name: "firmware-${{ steps.version_check.outputs.new_version }}"
           name: Firmware ${{ steps.version_check.outputs.new_version }}
           body: ${{ steps.prep_release.outputs.release_body }}
           files: Firmware.zip
-          make_latest: true # 标记为最新Release
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
