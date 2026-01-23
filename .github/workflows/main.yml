@@ -64,7 +64,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 抓取 RSS 并通过 sort -V 确保提取数值最大的版本号 (21.2.0)
+          # 抓取 RSS 并通过 sort -V 确保提取数值最大的版本号 (例如 21.2.0)
           RSS_FEED=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
           NEW_VERSION=$(echo "$RSS_FEED" | grep '<title>Switch ' | grep -v 'Switch 2 ' | grep -oP 'Switch \K[0-9.]+' | sort -V | tail -n 1)
 
@@ -76,13 +76,13 @@ jobs:
           echo "INFO: Highest Version Detected: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
+          # 检查该版本是否已经存在于 Release 中
           set +e 
-          CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
+          TAG_EXISTS=$(gh release view "$NEW_VERSION" --json tagName -q .tagName 2>/dev/null)
           set -e
-          CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
           
           UPDATE_NEEDED="false"
-          if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+          if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ -z "$TAG_EXISTS" ]; then
             UPDATE_NEEDED="true"
           fi
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
@@ -100,7 +100,10 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
-          if [ -z "$FIRMWARE_FOLDER" ]; then exit 1; fi
+          if [ -z "$FIRMWARE_FOLDER" ]; then
+             echo "::error::No firmware folder found!"
+             exit 1
+          fi
           
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           echo "zip_size=$(stat -c%s Firmware.zip)" >> $GITHUB_OUTPUT
@@ -115,11 +118,11 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
+          # 获取历史下载量 (从最新的 Release 中累加)
+          PREV_DATA=$(gh release view --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
           CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add' 2>/dev/null || echo "0")
-          
           NEW_TOTAL=$(( (HISTORY_BASE == "null" ? 0 : HISTORY_BASE) + (CURRENT_COUNT == "null" ? 0 : CURRENT_COUNT) ))
 
           # 读取 Python 生成的信息
@@ -155,7 +158,7 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          tag_name: ${{ steps.version_check.outputs.new_version }}
           name: Firmware ${{ steps.version_check.outputs.new_version }}
           body: ${{ steps.prep_release.outputs.release_body }}
           files: Firmware.zip
