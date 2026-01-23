@@ -63,18 +63,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
-                         grep '<title>Switch ' | \
-                         grep -v '<title>Switch 2 ' | \
-                         head -n 1)
-
-          if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::RSS feed error"
+          # 获取所有版本并找到最新版本
+          RSS_CONTENT=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
+          
+          # 提取所有Switch版本（排除Switch 2）
+          VERSIONS=$(echo "$RSS_CONTENT" | grep -oP '<title>Switch \K[0-9.]+(?=</title>)' | grep -v '^2')
+          
+          if [ -z "$VERSIONS" ]; then
+            echo "::error::No Switch firmware versions found in RSS feed"
             exit 1 
           fi
-
-          NEW_VERSION=$(echo "$LATEST_TITLE" | grep -oP 'Switch \K[0-9.]+')
-          echo "INFO: RSS Version: $NEW_VERSION"
+          
+          # 按照版本号排序，获取最新版本
+          NEW_VERSION=$(echo "$VERSIONS" | sort -t '.' -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1)
+          
+          echo "INFO: All versions found:"
+          echo "$VERSIONS" | sort -t '.' -k1,1n -k2,2n -k3,3n -k4,4n
+          echo "INFO: Latest Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
           if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
@@ -89,8 +94,12 @@ jobs:
 
           if [ -z "$CURRENT_RELEASE_VERSION" ]; then
             CURRENT_RELEASE_VERSION="0.0.0"
+          else
+            # 从 release 名称中提取版本号（移除 "Firmware " 前缀）
+            CURRENT_RELEASE_VERSION=$(echo "$CURRENT_RELEASE_VERSION" | sed 's/Firmware //')
           fi
           
+          # 比较版本号
           if [ "$NEW_VERSION" == "$CURRENT_RELEASE_VERSION" ]; then
             echo "INFO: Version match ($NEW_VERSION). No update needed."
             echo "update_needed=false" >> $GITHUB_OUTPUT
