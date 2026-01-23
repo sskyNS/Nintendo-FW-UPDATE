@@ -6,6 +6,7 @@ import hashlib
 import warnings
 import re
 import html
+import sys
 from struct import unpack
 from binascii import hexlify
 from glob import glob
@@ -14,7 +15,7 @@ from subprocess import run, PIPE
 from os import makedirs, remove
 from os.path import basename, exists, join
 from configparser import ConfigParser
-from sys import argv
+from sys import argv, exit
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -69,8 +70,8 @@ def dlfile(url, out):
             "--check-certificate=false",
             f"--out={out}", "-c", url
         ], check=True)
-    except FileNotFoundError:
-        print(f"downloading {basename(out)} via requests")
+    except Exception as e:
+        print(f"Aria2 failed, falling back to requests: {e}")
         resp = request(
             "GET", url,
             cert=("keys/switch_client.crt", "keys/switch_client.key"),
@@ -97,16 +98,15 @@ def dlfiles(dltable):
             "--check-certificate=false",
             "-x", "16", "-s", "16", "-i", "dl.tmp"
         ], check=True)
-    except FileNotFoundError:
+    except Exception:
+        print("Aria2 batch download failed, falling back to sequential download...")
         for url, dirc, fname, fhash in dltable:
             makedirs(dirc, exist_ok=True)
             out = join(dirc, fname)
             dlfile(url, out)
     finally:
-        try:
+        if exists("dl.tmp"):
             remove("dl.tmp")
-        except FileNotFoundError:
-            pass
 
 def nin_request(method, url, headers=None):
     if headers is None:
@@ -124,11 +124,23 @@ def parse_cnmt(nca):
     ncaf = basename(nca)
     hactool_bin = "hactool.exe" if os.name == "nt" else "./hactool" 
     cnmt_temp_dir = f"cnmt_tmp_{ncaf}"
+    
+    if not exists(hactool_bin):
+        print(f"::error::hactool binary not found at {hactool_bin}")
+        exit(1)
+
     run(
         [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
-        stdout=PIPE, stderr=PIPE
+        stdout=PIPE, stderr=PIPE, check=True
     )
-    cnmt_file = glob(f"{cnmt_temp_dir}/*.cnmt")[0]
+    
+    cnmt_files = glob(f"{cnmt_temp_dir}/*.cnmt")
+    if not cnmt_files:
+        print(f"::error::Failed to extract CNMT from {nca}")
+        rmtree(cnmt_temp_dir, ignore_errors=True)
+        exit(1)
+        
+    cnmt_file = cnmt_files[0]
     entries = []
     with open(cnmt_file, "rb") as c:
         c_type = readdata(c, 0xc, 1)
@@ -150,7 +162,7 @@ def parse_cnmt(nca):
                 h      = c.read(32)
                 nid    = hexify(c.read(16))
                 entries.append((nid, hexify(h)))
-    rmtree(cnmt_temp_dir)
+    rmtree(cnmt_temp_dir, ignore_errors=True)
     return entries
 
 seen_titles = set()
@@ -162,6 +174,7 @@ def dltitle(title_id, version, is_su=False):
     if key in seen_titles: return
     seen_titles.add(key)
     p = "s" if is_su else "a"
+    
     try:
         cnmt_id = nin_request(
             "HEAD",
@@ -169,17 +182,30 @@ def dltitle(title_id, version, is_su=False):
         ).headers["X-Nintendo-Content-ID"]
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            if title_id == "010000000000081B": sv_nca_exfat = ""
-            return
+            # === 修复重点：只允许 exFAT 包(081B) 缺失，核心包缺失必须报错 ===
+            if title_id == "010000000000081B": 
+                print("INFO: exFAT update not found (404), skipping.")
+                sv_nca_exfat = ""
+                return
+            else:
+                print(f"::error::Critical title {title_id} (Version {version}) not found on CDN (404). Propagation delay?")
+                exit(1)
         raise
+        
     ver_dir = f"Firmware {ver_string_simple}"
     makedirs(ver_dir, exist_ok=True)
     cnmt_nca = f"{ver_dir}/{cnmt_id}.cnmt.nca"
     update_files.append(cnmt_nca)
-    dlfile(
-        f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/{p}/{cnmt_id}?device_id={device_id}",
-        cnmt_nca
-    )
+    
+    try:
+        dlfile(
+            f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/{p}/{cnmt_id}?device_id={device_id}",
+            cnmt_nca
+        )
+    except Exception as e:
+        print(f"::error::Failed to download CNMT {cnmt_id}: {e}")
+        exit(1)
+
     if is_su:
         for t_id, ver in parse_cnmt(cnmt_nca): dltitle(t_id, ver)
     else:
@@ -231,7 +257,10 @@ def get_changelog_robust(version_str):
     return DEFAULT_CHANGELOG
 
 if __name__ == "__main__":
-    if not exists("certificat.pem"): exit(1)
+    if not exists("certificat.pem"): 
+        print("::error::certificat.pem not found")
+        exit(1)
+        
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -239,21 +268,34 @@ if __name__ == "__main__":
     cert.save("keys/switch_client.crt", tls.TYPE_PEM)
     priv.save("keys/switch_client.key", tls.TYPE_PEM)
 
-    if not exists("prod.keys"): exit(1)
+    if not exists("prod.keys"): 
+        print("::error::prod.keys not found")
+        exit(1)
+        
     prod_keys = ConfigParser(strict=False)
     with open("prod.keys") as f: prod_keys.read_string("[keys]" + f.read())
 
-    if not exists("PRODINFO.bin"): exit(1)
+    if not exists("PRODINFO.bin"): 
+        print("::error::PRODINFO.bin not found")
+        exit(1)
+        
     with open("PRODINFO.bin", "rb") as pf:
-        if pf.read(4) != b"CAL0": exit(1)
+        if pf.read(4) != b"CAL0": 
+            print("::error::Invalid PRODINFO.bin (Magic mismatch)")
+            exit(1)
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
     if VERSION == "":
         print("INFO: Searching for latest version...")
-        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-        ver_raw = su_meta["system_update_metas"][0]["title_version"]
+        try:
+            su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
+            ver_raw = su_meta["system_update_metas"][0]["title_version"]
+        except Exception as e:
+            print(f"::error::Failed to fetch system_update_meta: {e}")
+            exit(1)
+            
         ver_major = ver_raw // 0x4000000
         ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
         ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
@@ -277,18 +319,26 @@ if __name__ == "__main__":
     seen_titles.clear()
     queued_ncas.clear()
 
+    # 这里的 404 将在 dltitle 内部处理
     dltitle("0100000000000816", ver_raw, is_su=True)
     
     if not sv_nca_exfat:
         print("INFO: exFAT not found via meta, attempting separate title...")
         dltitle("010000000000081B", ver_raw, is_su=False)
 
+    # === 修复重点：如果队列为空，说明未下载到任何文件 ===
+    if not update_files:
+        print("::error::No files queued for download. Aborting.")
+        exit(1)
+
     print(f"Starting batch download for {len(update_dls)} files...")
     dlfiles(update_dls)
 
     failed = False
     for fpath in update_files:
-        if not exists(fpath): failed = True
+        if not exists(fpath): 
+            print(f"::error::Missing file after download: {fpath}")
+            failed = True
     if failed: exit(1)
 
     changelog_text = get_changelog_robust(ver_string_simple)
