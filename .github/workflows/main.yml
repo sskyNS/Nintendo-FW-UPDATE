@@ -63,23 +63,32 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取所有版本并找到最新版本
+          # 获取RSS feed内容
           RSS_CONTENT=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
           
-          # 提取所有Switch版本（排除Switch 2）
-          VERSIONS=$(echo "$RSS_CONTENT" | grep -oP '<title>Switch \K[0-9.]+(?=</title>)' | grep -v '^2')
+          # 提取所有Switch标题（排除Switch 2）
+          SWITCH_ITEMS=$(echo "$RSS_CONTENT" | awk '/<item>/,/<\/item>/' | grep -oP '<title>Switch \K[0-9.]+(?=</title>)' | grep -v '^2')
           
-          if [ -z "$VERSIONS" ]; then
+          if [ -z "$SWITCH_ITEMS" ]; then
+            # 备用方法：直接解析整个XML
+            echo "Trying alternative method..."
+            SWITCH_ITEMS=$(echo "$RSS_CONTENT" | grep -oP '<title>Switch \K[0-9.]+(?=</title>)' | grep -v '^2')
+          fi
+          
+          if [ -z "$SWITCH_ITEMS" ]; then
             echo "::error::No Switch firmware versions found in RSS feed"
             exit 1 
           fi
           
-          # 按照版本号排序，获取最新版本
-          NEW_VERSION=$(echo "$VERSIONS" | sort -t '.' -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1)
+          # 去重并排序
+          UNIQUE_VERSIONS=$(echo "$SWITCH_ITEMS" | sort -u)
+          echo "INFO: Unique Switch versions found:"
+          echo "$UNIQUE_VERSIONS"
           
-          echo "INFO: All versions found:"
-          echo "$VERSIONS" | sort -t '.' -k1,1n -k2,2n -k3,3n -k4,4n
-          echo "INFO: Latest Version: $NEW_VERSION"
+          # 按照版本号排序，获取最新版本（支持最多4个数字段）
+          NEW_VERSION=$(echo "$UNIQUE_VERSIONS" | sort -t '.' -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1)
+          
+          echo "INFO: Latest Switch Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
           if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "${{ github.event_name }}" == "push" ]; then
