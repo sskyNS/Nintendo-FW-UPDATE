@@ -66,19 +66,18 @@ jobs:
         run: |
           # 1. 抓取 RSS 
           RSS_FEED=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
-          
-          # 2. 严格过滤：必须包含 'Switch ' 但不能包含 'Switch 2 '
-          # 提取版本号并取第一个（最新的）
-          NEW_VERSION=$(echo "$RSS_FEED" | grep '<title>Switch ' | grep -v 'Switch 2 ' | grep -oP 'Switch \K[0-9.]+' | head -n 1)
+
+          NEW_VERSION=$(echo "$RSS_FEED" | grep -oP '<title>Switch \K[0-9.]+(?=</title>)' | head -n 1)
 
           if [ -z "$NEW_VERSION" ]; then
-            echo "::error::Could not parse a valid Switch 1 version."
+            echo "::error::Could not parse a valid Switch 1 version from RSS."
             exit 1 
           fi
 
-          echo "INFO: Latest parsed version: $NEW_VERSION"
+          echo "INFO: Latest version detected from RSS: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
+          # 获取当前 Release 的版本
           set +e 
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
@@ -87,6 +86,9 @@ jobs:
           UPDATE_NEEDED="false"
           if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
             UPDATE_NEEDED="true"
+            echo "INFO: Update is needed ($CURRENT_VERSION -> $NEW_VERSION)"
+          else
+            echo "INFO: Already up to date ($CURRENT_VERSION)"
           fi
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
@@ -97,6 +99,7 @@ jobs:
           set -o pipefail
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware.zip"
+          # 传递从网页解析到的版本号给脚本
           python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}"
 
       - name: Process firmware files
@@ -104,9 +107,11 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
-          if [ -z "$FIRMWARE_FOLDER" ]; then exit 1; fi
+          if [ -z "$FIRMWARE_FOLDER" ]; then 
+            echo "::error::No firmware folder found after download."
+            exit 1
+          fi
           
-          ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
           
           echo "zip_size=$(stat -c%s Firmware.zip)" >> $GITHUB_OUTPUT
@@ -121,16 +126,15 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 修正下载统计逻辑
+          # 统计历史下载量
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
           CURRENT_COUNT=$(echo "$PREV_DATA" | jq -r '[.assets[].download_count] | add' 2>/dev/null || echo "0")
-          
           NEW_TOTAL=$(( (HISTORY_BASE == "null" ? 0 : HISTORY_BASE) + (CURRENT_COUNT == "null" ? 0 : CURRENT_COUNT) ))
 
+          # 读取 Python 脚本生成的 info 文件
           source firmware_info.txt
-          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
 
           {
