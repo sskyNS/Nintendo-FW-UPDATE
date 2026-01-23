@@ -32,6 +32,9 @@ ENV     = "lp1"
 VERSION = argv[1] if len(argv) > 1 else ""
 DEFAULT_CHANGELOG = "General system stability improvements to enhance the user's experience."
 
+class VersionNotFoundError(Exception):
+    pass
+
 def readdata(f, addr, size):
     f.seek(addr)
     return f.read(size)
@@ -71,7 +74,7 @@ def dlfile(url, out):
             f"--out={out}", "-c", url
         ], check=True)
     except Exception as e:
-        print(f"Aria2 failed, falling back to requests: {e}")
+        # print(f"Aria2 failed, falling back to requests: {e}")
         resp = request(
             "GET", url,
             cert=("keys/switch_client.crt", "keys/switch_client.key"),
@@ -182,14 +185,13 @@ def dltitle(title_id, version, is_su=False):
         ).headers["X-Nintendo-Content-ID"]
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            # === 修复重点：只允许 exFAT 包(081B) 缺失，核心包缺失必须报错 ===
             if title_id == "010000000000081B": 
                 print("INFO: exFAT update not found (404), skipping.")
                 sv_nca_exfat = ""
                 return
             else:
-                print(f"::error::Critical title {title_id} (Version {version}) not found on CDN (404). Propagation delay?")
-                exit(1)
+                # 抛出异常由主逻辑处理
+                raise VersionNotFoundError(f"Title {title_id} v{version} not found")
         raise
         
     ver_dir = f"Firmware {ver_string_simple}"
@@ -226,22 +228,15 @@ def get_changelog_robust(version_str):
         rss_url = "https://yls8.mtheall.com/ninupdates/feed.php"
         rss_resp = request("GET", rss_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
         if rss_resp.status_code != 200: return DEFAULT_CHANGELOG
-
         content = rss_resp.text
         target_title = f"Switch {version_str}"
         item_start = content.find(target_title)
-        
         if item_start == -1: return DEFAULT_CHANGELOG
-            
         link_start = content.find("<link>", item_start)
         link_end = content.find("</link>", link_start)
-        
         if link_start == -1 or link_end == -1: return DEFAULT_CHANGELOG
-            
         report_url = content[link_start+6 : link_end].strip()
         report_url = html.unescape(report_url)
-        print(f"Found report URL: {report_url}")
-
         report_resp = request("GET", report_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
         if report_resp.status_code == 200:
             match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.IGNORECASE | re.DOTALL)
@@ -249,18 +244,29 @@ def get_changelog_robust(version_str):
                 text = match.group(1).strip()
                 text = re.sub(r'<[^>]+>', '', text)
                 text = re.sub(r'\s+', ' ', text)
-                if len(text) > 5:
-                    return text
+                if len(text) > 5: return text
     except Exception as e:
         print(f"Changelog fetch error: {e}")
-    
     return DEFAULT_CHANGELOG
+
+def fetch_meta_version():
+    try:
+        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
+        raw = su_meta["system_update_metas"][0]["title_version"]
+        v_maj = raw // 0x4000000
+        v_min = (raw - v_maj*0x4000000) // 0x100000
+        v_s1  = (raw - v_maj*0x4000000 - v_min*0x100000) // 0x10000
+        # v_s2 通常是内部修订版本
+        v_str = f"{v_maj}.{v_min}.{v_s1}"
+        return raw, v_str
+    except Exception as e:
+        print(f"::warning::Failed to fetch meta: {e}")
+        return None, None
 
 if __name__ == "__main__":
     if not exists("certificat.pem"): 
         print("::error::certificat.pem not found")
         exit(1)
-        
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -271,14 +277,12 @@ if __name__ == "__main__":
     if not exists("prod.keys"): 
         print("::error::prod.keys not found")
         exit(1)
-        
     prod_keys = ConfigParser(strict=False)
     with open("prod.keys") as f: prod_keys.read_string("[keys]" + f.read())
 
     if not exists("PRODINFO.bin"): 
         print("::error::PRODINFO.bin not found")
         exit(1)
-        
     with open("PRODINFO.bin", "rb") as pf:
         if pf.read(4) != b"CAL0": 
             print("::error::Invalid PRODINFO.bin (Magic mismatch)")
@@ -287,30 +291,24 @@ if __name__ == "__main__":
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
+    ver_raw = 0
+    ver_string_simple = ""
+
     if VERSION == "":
-        print("INFO: Searching for latest version...")
-        try:
-            su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-            ver_raw = su_meta["system_update_metas"][0]["title_version"]
-        except Exception as e:
-            print(f"::error::Failed to fetch system_update_meta: {e}")
+        print("INFO: Searching for latest version from Meta...")
+        ver_raw, ver_string_simple = fetch_meta_version()
+        if not ver_raw:
+            print("::error::Could not determine version.")
             exit(1)
-            
-        ver_major = ver_raw // 0x4000000
-        ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
-        ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
-        ver_sub2  = ver_raw - ver_major*0x4000000 - ver_minor*0x100000 - ver_sub1*0x10000
-        ver_string_raw = f"{ver_major}.{ver_minor}.{ver_sub1}.{str(ver_sub2).zfill(4)}"
-        ver_string_simple = f"{ver_major}.{ver_minor}.{ver_sub1}"
     else:
+        # 1. 尝试计算版本号
         ver_string_simple = VERSION
         parts = list(map(int, VERSION.split(".")))
         if len(parts) == 3: parts.append(0) 
         ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
-        ver_string_raw = f"{parts[0]}.{parts[1]}.{parts[2]}.{str(parts[3]).zfill(4)}"
 
     ver_dir = f"Firmware {ver_string_simple}"
-    print(f"Downloading firmware {ver_string_simple}...")
+    print(f"Downloading firmware {ver_string_simple} (Raw: {ver_raw})...")
 
     update_files = []
     update_dls   = []
@@ -319,14 +317,37 @@ if __name__ == "__main__":
     seen_titles.clear()
     queued_ncas.clear()
 
-    # 这里的 404 将在 dltitle 内部处理
-    dltitle("0100000000000816", ver_raw, is_su=True)
-    
+    # === 智能重试逻辑 ===
+    try:
+        dltitle("0100000000000816", ver_raw, is_su=True)
+    except VersionNotFoundError:
+        print(f"INFO: Version {ver_raw} not found directly. Checking Nintendo Meta for correction...")
+        
+        # 尝试获取官方当前的 Meta 信息
+        meta_raw, meta_str = fetch_meta_version()
+        
+        if meta_raw and meta_str == ver_string_simple:
+            # 如果 Meta 显示的版本号字符串（如 19.0.2）和我们想要的一样，
+            # 说明我们的 Raw 计算可能不对（可能是 Revision 差异），使用官方的 Raw 重试
+            print(f"INFO: Meta match found! Correcting Raw ID from {ver_raw} to {meta_raw}...")
+            ver_raw = meta_raw
+            seen_titles.clear() # 清除缓存
+            try:
+                dltitle("0100000000000816", ver_raw, is_su=True)
+            except VersionNotFoundError:
+                print("::error::Even with Meta correction, files are 404. CDN is likely not synced yet.")
+                exit(1)
+        else:
+            # 如果 Meta 显示的版本（如 19.0.1）比我们想要的（19.0.2）旧
+            print(f"::error::Nintendo CDN Meta reports version {meta_str}, but you requested {ver_string_simple}.")
+            print("::error::The files have not propagated to the CDN server yet. Please wait a few hours.")
+            exit(1)
+
     if not sv_nca_exfat:
         print("INFO: exFAT not found via meta, attempting separate title...")
+        # exFAT 下载是可选的，如果找不到(404)在 dltitle 内部会忽略
         dltitle("010000000000081B", ver_raw, is_su=False)
 
-    # === 修复重点：如果队列为空，说明未下载到任何文件 ===
     if not update_files:
         print("::error::No files queued for download. Aborting.")
         exit(1)
