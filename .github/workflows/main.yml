@@ -55,7 +55,7 @@ jobs:
             cp hactool-linux hactool
             chmod +x hactool
           else
-            echo "::warning::hactool-linux not found in repository root"
+            echo "::warning::hactool-linux not found in repository root. Ensure it is uploaded."
           fi
 
       - name: Check firmware version
@@ -70,7 +70,7 @@ jobs:
                          head -n 1)
 
           if [ -z "$LATEST_TITLE" ]; then
-            echo "::error::RSS feed error"
+            echo "::error::RSS feed error or empty"
             exit 1 
           fi
 
@@ -101,7 +101,6 @@ jobs:
 
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
-      # === 修复重点：还原关键文件 ===
       - name: Restore critical files
         if: steps.version_check.outputs.update_needed == 'true'
         env:
@@ -134,9 +133,10 @@ jobs:
           
           echo "Starting Downloader..."
           
-          # === 修复重点：开启 pipefail，防止 tee 掩盖 Python 报错 ===
+          # 开启 pipefail 确保 Python 报错能被捕获
           set -o pipefail
           
+          # 运行脚本
           python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
       - name: Process firmware files
