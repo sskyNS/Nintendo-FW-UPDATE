@@ -14,7 +14,7 @@ on:
       force_update:
         description: 'Force update'
         required: false
-        default: false # 默认不强制，只有版本更新才跑
+        default: false
         type: boolean
 
 jobs:
@@ -49,25 +49,14 @@ jobs:
           && sudo apt update \
           && sudo apt install gh -y
 
-    - name: Setup hactool
+      - name: Setup hactool
         run: |
           if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool
             chmod +x hactool
           else
-            echo "::warning::hactool-linux not found"
+            echo "::warning::hactool-linux not found in repository root"
           fi
-
-      - name: Restore key files
-        if: steps.version_check.outputs.update_needed == 'true'
-        env:
-          PROD_KEYS: ${{ secrets.PROD_KEYS }}
-          CERT_PEM: ${{ secrets.CERT_PEM }}
-          PRODINFO_BIN: ${{ secrets.PRODINFO_BIN }}
-        run: |
-          echo "$PROD_KEYS" > prod.keys
-          echo "$CERT_PEM" > certificat.pem
-          echo "$PRODINFO_BIN" | base64 -d > PRODINFO.bin
 
       - name: Check firmware version
         id: version_check
@@ -94,7 +83,6 @@ jobs:
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
 
-          # 从 "Firmware 17.0.1" 这种格式中提取纯版本号 "17.0.1"
           CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
           echo "INFO: Current Release Version: $CURRENT_VERSION"
 
@@ -113,19 +101,42 @@ jobs:
 
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
+      # === 修复重点：还原关键文件 ===
+      - name: Restore critical files
+        if: steps.version_check.outputs.update_needed == 'true'
+        env:
+          PROD_KEYS: ${{ secrets.PROD_KEYS }}
+          CERT_PEM: ${{ secrets.CERT_PEM }}
+          PRODINFO_BIN: ${{ secrets.PRODINFO_BIN }}
+        run: |
+          echo "Restoring prod.keys..."
+          echo "$PROD_KEYS" > prod.keys
+          
+          echo "Restoring certificat.pem..."
+          echo "$CERT_PEM" > certificat.pem
+          
+          echo "Restoring PRODINFO.bin..."
+          echo "$PRODINFO_BIN" | base64 -d > PRODINFO.bin
+          
+          if [ ! -s prod.keys ] || [ ! -s PRODINFO.bin ]; then
+             echo "::error::Secrets are empty or failed to restore!"
+             exit 1
+          fi
+
       - name: Execute download script
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
+        shell: bash
         run: |
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
-          set -o pipefail
-          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
           
-          # 传入检测到的新版本号给脚本
+          # === 修复重点：开启 pipefail，防止 tee 掩盖 Python 报错 ===
+          set -o pipefail
+          
           python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
       - name: Process firmware files
@@ -136,7 +147,7 @@ jobs:
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
-            echo "::error::Firmware folder not found!"
+            echo "::error::Firmware folder not found! (Download script failed or didn't create folder)"
             exit 1
           fi
           
@@ -162,7 +173,6 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取历史下载计数逻辑
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
@@ -172,7 +182,6 @@ jobs:
           if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then CURRENT_COUNT=0; fi
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
 
-          # 读取 Python 脚本生成的信息
           get_val() { grep "^$1=" firmware_info.txt | cut -d'=' -f2-; }
           if [ -f firmware_info.txt ]; then
              VERSION=$(get_val VERSION)
