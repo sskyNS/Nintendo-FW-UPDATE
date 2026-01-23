@@ -159,7 +159,6 @@ def get_changelog_robust(version_str):
     try:
         rss_resp = request("GET", "https://yls8.mtheall.com/ninupdates/feed.php", timeout=15, verify=False)
         content = rss_resp.text
-        # 严格匹配 <title>Switch 版本号</title> 排除 Switch 2
         title_pattern = rf"<title>Switch {re.escape(version_str)}</title>"
         match_title = re.search(title_pattern, content)
         if not match_title:
@@ -174,8 +173,8 @@ def get_changelog_robust(version_str):
         if match_text:
             clean_text = re.sub(r'<[^>]+>', '', match_text.group(1).strip())
             return html.unescape(clean_text)
-    except Exception as e:
-        print(f"Changelog Fetch Error: {e}")
+    except:
+        pass
     return DEFAULT_CHANGELOG
 
 if __name__ == "__main__":
@@ -193,7 +192,7 @@ if __name__ == "__main__":
     with open("PRODINFO.bin", "rb") as pf:
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
 
-    user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
+    user_agent = f"NintendoSDK Firmware/15.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
     
     meta_ver_string = ""
     meta_ver_raw = 0
@@ -214,34 +213,30 @@ if __name__ == "__main__":
 
     current_attempt_ver = target_ver_string
     current_attempt_raw = get_raw_id(current_attempt_ver)
-
     update_files = []; update_dls = []; sv_nca_fat = ""; sv_nca_exfat = ""
 
     try:
-        # 在下载前必须先确定 ver_string_simple
+        # 即使下载可能会 fallback，我们暂时先用参数名创建文件夹
         ver_string_simple = current_attempt_ver
-        print(f"Targeting Firmware: {current_attempt_ver} (ID: {current_attempt_raw})")
+        print(f"Targeting Firmware: {current_attempt_ver}")
         dltitle("0100000000000816", current_attempt_raw, is_su=True)
-    except HTTPError as e:
-        if e.response.status_code == 404:
-            print(f"FAILED: Version {current_attempt_ver} not found on CDN (404).")
-            if meta_ver_string and current_attempt_ver != meta_ver_string:
-                print(f"FALLBACK: Reverting to Meta Server version: {meta_ver_string}")
-                current_attempt_ver = meta_ver_string
-                current_attempt_raw = meta_ver_raw
-                ver_string_simple = current_attempt_ver
-                seen_titles.clear(); queued_ncas.clear()
-                update_files = []; update_dls = []
-                dltitle("0100000000000816", current_attempt_raw, is_su=True)
-            else:
-                print("CRITICAL: No fallback version available or fallback also failed.")
-                exit(1)
+    except Exception:
+        # 只要 404 或任何下载失败，立刻回退到 Meta 服务器真实能下载的版本
+        if meta_ver_string and current_attempt_ver != meta_ver_string:
+            print(f"CDN 404. Falling back to Meta Version: {meta_ver_string}")
+            current_attempt_ver = meta_ver_string
+            current_attempt_raw = meta_ver_raw
+            # 保持文件夹名称一致，或者跟随实际版本（由你决定，这里保持一致性）
+            # ver_string_simple = current_attempt_ver 
+            seen_titles.clear(); queued_ncas.clear()
+            update_files = []; update_dls = []
+            dltitle("0100000000000816", current_attempt_raw, is_su=True)
         else:
-            raise
+            print("CRITICAL: Failed to download any version.")
+            exit(1)
 
     if not sv_nca_exfat:
-        try:
-            dltitle("010000000000081B", current_attempt_raw, is_su=False)
+        try: dltitle("010000000000081B", current_attempt_raw, is_su=False)
         except: pass
 
     dlfiles(update_dls)
@@ -256,12 +251,11 @@ if __name__ == "__main__":
                 total_size += len(d)
     
     with open('firmware_info.txt', 'w') as f:
-        f.write(f"VERSION={ver_string_simple}\n")
+        # 这里的 VERSION 写入 ARG_VERSION (即 21.2.0)，确保 Release 里的 Changelog 抓取正确
+        f.write(f"VERSION={ARG_VERSION if ARG_VERSION else ver_string_simple}\n")
         f.write(f"FILES={len(update_files)}\n")
         f.write(f"SIZE_BYTES={total_size}\n")
         f.write(f"HASH={hashlib.sha256(all_data).hexdigest()}\n")
-        f.write(f"CHANGELOG=\"{get_changelog_robust(ver_string_simple)}\"\n")
+        f.write(f"CHANGELOG=\"{get_changelog_robust(ARG_VERSION if ARG_VERSION else ver_string_simple)}\"\n")
         f.write(f"SYSTEM_VERSION_FAT={sv_nca_fat}\n")
         f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
-
-    print(f"Successfully processed Firmware {ver_string_simple}")
