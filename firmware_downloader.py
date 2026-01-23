@@ -4,7 +4,8 @@
 import os
 import hashlib
 import warnings
-import json
+import re
+import html
 from struct import unpack
 from binascii import hexlify
 from glob import glob
@@ -13,8 +14,7 @@ from subprocess import run, PIPE
 from os import makedirs, remove
 from os.path import basename, exists, join
 from configparser import ConfigParser
-from sys import argv, exit
-from zipfile import ZipFile, ZIP_DEFLATED 
+from sys import argv
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -28,8 +28,8 @@ except ImportError:
 warnings.filterwarnings("ignore")
 
 ENV     = "lp1"
-# 如果命令行没有传参数，则 VERSION 为空，触发自动探测模式
-VERSION = argv[1] if len(argv) > 1 and argv[1].strip() != "" else None
+VERSION = argv[1] if len(argv) > 1 else ""
+DEFAULT_CHANGELOG = "General system stability improvements to enhance the user's experience."
 
 def readdata(f, addr, size):
     f.seek(addr)
@@ -58,7 +58,6 @@ def ihexify(n, b):
     return hex(n)[2:].zfill(b * 2)
 
 def dlfile(url, out):
-    # 优先尝试 Aria2，失败回退到 Requests
     try:
         run([
             "aria2c", "--no-conf", "--console-log-level=error",
@@ -70,12 +69,13 @@ def dlfile(url, out):
             "--check-certificate=false",
             f"--out={out}", "-c", url
         ], check=True)
-    except Exception:
+    except FileNotFoundError:
+        print(f"downloading {basename(out)} via requests")
         resp = request(
             "GET", url,
             cert=("keys/switch_client.crt", "keys/switch_client.key"),
             headers={"User-Agent": user_agent},
-            stream=True, verify=False, timeout=60
+            stream=True, verify=False
         )
         resp.raise_for_status()
         with open(out, "wb") as f:
@@ -97,15 +97,16 @@ def dlfiles(dltable):
             "--check-certificate=false",
             "-x", "16", "-s", "16", "-i", "dl.tmp"
         ], check=True)
-    except Exception:
-        print("Aria2 batch failed, falling back to sequential download...")
+    except FileNotFoundError:
         for url, dirc, fname, fhash in dltable:
             makedirs(dirc, exist_ok=True)
             out = join(dirc, fname)
             dlfile(url, out)
     finally:
-        if exists("dl.tmp"):
+        try:
             remove("dl.tmp")
+        except FileNotFoundError:
+            pass
 
 def nin_request(method, url, headers=None):
     if headers is None:
@@ -114,33 +115,20 @@ def nin_request(method, url, headers=None):
     resp = request(
         method, url,
         cert=("keys/switch_client.crt", "keys/switch_client.key"),
-        headers=headers, verify=False, timeout=30
+        headers=headers, verify=False
     )
     resp.raise_for_status()
     return resp
 
 def parse_cnmt(nca):
     ncaf = basename(nca)
-    # 兼容 Workflow 路径
-    hactool_bin = "./hactool" if not os.name == "nt" else "hactool.exe" 
-    
-    if not exists(hactool_bin) and not os.name == "nt":
-        print("::error::hactool binary not found!")
-        exit(1)
-
+    hactool_bin = "hactool.exe" if os.name == "nt" else "./hactool" 
     cnmt_temp_dir = f"cnmt_tmp_{ncaf}"
-    
     run(
         [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
-        stdout=PIPE, stderr=PIPE, check=True
+        stdout=PIPE, stderr=PIPE
     )
-    
-    cnmt_files = glob(f"{cnmt_temp_dir}/*.cnmt")
-    if not cnmt_files:
-        print(f"::error::No CNMT found in {nca}")
-        exit(1)
-
-    cnmt_file = cnmt_files[0]
+    cnmt_file = glob(f"{cnmt_temp_dir}/*.cnmt")[0]
     entries = []
     with open(cnmt_file, "rb") as c:
         c_type = readdata(c, 0xc, 1)
@@ -162,7 +150,6 @@ def parse_cnmt(nca):
                 h      = c.read(32)
                 nid    = hexify(c.read(16))
                 entries.append((nid, hexify(h)))
-    
     rmtree(cnmt_temp_dir)
     return entries
 
@@ -171,12 +158,9 @@ queued_ncas = set()
 
 def dltitle(title_id, version, is_su=False):
     global update_files, update_dls, sv_nca_fat, sv_nca_exfat, seen_titles, queued_ncas, ver_string_simple
-
     key = (title_id, version, is_su)
-    if key in seen_titles:
-        return
+    if key in seen_titles: return
     seen_titles.add(key)
-
     p = "s" if is_su else "a"
     try:
         cnmt_id = nin_request(
@@ -185,56 +169,69 @@ def dltitle(title_id, version, is_su=False):
         ).headers["X-Nintendo-Content-ID"]
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            if title_id == "010000000000081B":
-                # exFAT 404 是允许的
-                return
-            else:
-                raise ValueError(f"Title {title_id} v{version} not found")
+            if title_id == "010000000000081B": sv_nca_exfat = ""
+            return
         raise
-
     ver_dir = f"Firmware {ver_string_simple}"
     makedirs(ver_dir, exist_ok=True)
-
     cnmt_nca = f"{ver_dir}/{cnmt_id}.cnmt.nca"
     update_files.append(cnmt_nca)
     dlfile(
         f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/{p}/{cnmt_id}?device_id={device_id}",
         cnmt_nca
     )
-
     if is_su:
-        for t_id, ver in parse_cnmt(cnmt_nca):
-            dltitle(t_id, ver)
+        for t_id, ver in parse_cnmt(cnmt_nca): dltitle(t_id, ver)
     else:
         for nca_id, nca_hash in parse_cnmt(cnmt_nca):
-            if title_id == "0100000000000809":
-                sv_nca_fat = f"{nca_id}.nca"
-            elif title_id == "010000000000081B":
-                sv_nca_exfat = f"{nca_id}.nca"
-
+            if title_id == "0100000000000809": sv_nca_fat = f"{nca_id}.nca"
+            elif title_id == "010000000000081B": sv_nca_exfat = f"{nca_id}.nca"
             if nca_id not in queued_ncas:
                 queued_ncas.add(nca_id)
                 update_files.append(f"{ver_dir}/{nca_id}.nca")
                 update_dls.append((
                     f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/c/{nca_id}?device_id={device_id}",
-                    ver_dir,
-                    f"{nca_id}.nca",
-                    nca_hash
+                    ver_dir, f"{nca_id}.nca", nca_hash
                 ))
 
-def zipdir(src_dir, out_zip):
-    print(f"Creating archive {out_zip}...")
-    with ZipFile(out_zip, "w", compression=ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(src_dir):
-            for name in files:
-                full = os.path.join(root, name)
-                rel  = os.path.relpath(full, start=src_dir) 
-                zf.write(full, arcname=rel)
+def get_changelog_robust(version_str):
+    print("Attempting to fetch changelog...")
+    try:
+        rss_url = "https://yls8.mtheall.com/ninupdates/feed.php"
+        rss_resp = request("GET", rss_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if rss_resp.status_code != 200: return DEFAULT_CHANGELOG
+
+        content = rss_resp.text
+        target_title = f"Switch {version_str}"
+        item_start = content.find(target_title)
+        
+        if item_start == -1: return DEFAULT_CHANGELOG
+            
+        link_start = content.find("<link>", item_start)
+        link_end = content.find("</link>", link_start)
+        
+        if link_start == -1 or link_end == -1: return DEFAULT_CHANGELOG
+            
+        report_url = content[link_start+6 : link_end].strip()
+        report_url = html.unescape(report_url)
+        print(f"Found report URL: {report_url}")
+
+        report_resp = request("GET", report_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if report_resp.status_code == 200:
+            match = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                text = re.sub(r'<[^>]+>', '', text)
+                text = re.sub(r'\s+', ' ', text)
+                if len(text) > 5:
+                    return text
+    except Exception as e:
+        print(f"Changelog fetch error: {e}")
+    
+    return DEFAULT_CHANGELOG
 
 if __name__ == "__main__":
-    if not exists("certificat.pem"):
-        print("::error::certificat.pem not found")
-        exit(1)
+    if not exists("certificat.pem"): exit(1)
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -242,94 +239,78 @@ if __name__ == "__main__":
     cert.save("keys/switch_client.crt", tls.TYPE_PEM)
     priv.save("keys/switch_client.key", tls.TYPE_PEM)
 
-    if not exists("prod.keys"):
-        print("::error::prod.keys not found")
-        exit(1)
+    if not exists("prod.keys"): exit(1)
     prod_keys = ConfigParser(strict=False)
     with open("prod.keys") as f: prod_keys.read_string("[keys]" + f.read())
 
-    if not exists("PRODINFO.bin"):
-        print("::error::PRODINFO.bin not found")
-        exit(1)
+    if not exists("PRODINFO.bin"): exit(1)
     with open("PRODINFO.bin", "rb") as pf:
-        if pf.read(4) != b"CAL0":
-            print("::error::Invalid PRODINFO.bin")
-            exit(1)
+        if pf.read(4) != b"CAL0": exit(1)
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
-    ver_raw = 0
-    
-    # === 彻底修复：版本决策逻辑 ===
-    if VERSION is None:
-        print("INFO: Auto-discovery mode (fetching Meta from Nintendo)...")
-        try:
-            # 直接问任天堂服务器最新版是多少
-            su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-            ver_raw = su_meta["system_update_metas"][0]["title_version"]
-            
-            # 反向计算显示名称
-            v_maj = ver_raw // 0x4000000
-            v_min = (ver_raw - v_maj*0x4000000) // 0x100000
-            v_s1  = (ver_raw - v_maj*0x4000000 - v_min*0x100000) // 0x10000
-            ver_string_simple = f"{v_maj}.{v_min}.{v_s1}"
-            print(f"INFO: Nintendo Server reports latest version: {ver_string_simple} (Raw: {ver_raw})")
-        except Exception as e:
-            print(f"::error::Could not fetch Meta from Nintendo: {e}")
-            exit(1)
+    if VERSION == "":
+        print("INFO: Searching for latest version...")
+        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
+        ver_raw = su_meta["system_update_metas"][0]["title_version"]
+        ver_major = ver_raw // 0x4000000
+        ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
+        ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
+        ver_sub2  = ver_raw - ver_major*0x4000000 - ver_minor*0x100000 - ver_sub1*0x10000
+        ver_string_raw = f"{ver_major}.{ver_minor}.{ver_sub1}.{str(ver_sub2).zfill(4)}"
+        ver_string_simple = f"{ver_major}.{ver_minor}.{ver_sub1}"
     else:
-        # 如果手动强行指定了版本（不推荐），则尝试计算
-        print(f"INFO: Manual version requested: {VERSION}")
         ver_string_simple = VERSION
         parts = list(map(int, VERSION.split(".")))
         if len(parts) == 3: parts.append(0) 
         ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
+        ver_string_raw = f"{parts[0]}.{parts[1]}.{parts[2]}.{str(parts[3]).zfill(4)}"
 
     ver_dir = f"Firmware {ver_string_simple}"
-    print(f"Downloading firmware. Target: {ver_dir}")
+    print(f"Downloading firmware {ver_string_simple}...")
 
     update_files = []
     update_dls   = []
     sv_nca_fat   = ""
     sv_nca_exfat = ""
-
     seen_titles.clear()
     queued_ncas.clear()
 
-    # 下载主系统固件
-    try:
-        dltitle("0100000000000816", ver_raw, is_su=True)
-    except ValueError:
-        print(f"::error::Primary Title 0100000000000816 v{ver_raw} not found on CDN!")
-        print("::error::The keys provided might be for a different region, or the server is not ready.")
-        exit(1)
+    dltitle("0100000000000816", ver_raw, is_su=True)
+    
+    if not sv_nca_exfat:
+        print("INFO: exFAT not found via meta, attempting separate title...")
+        dltitle("010000000000081B", ver_raw, is_su=False)
 
+    print(f"Starting batch download for {len(update_dls)} files...")
     dlfiles(update_dls)
 
-    # 下载 exFAT
-    if not sv_nca_exfat:
-        print("INFO: Downloading optional exFAT driver...")
-        try:
-            dltitle("010000000000081B", ver_raw, is_su=False)
-            dlfiles(update_dls)
-        except ValueError:
-            print("INFO: exFAT driver not found (skipping).")
-
-    # 验证
     failed = False
     for fpath in update_files:
-        if not exists(fpath):
-            print(f"::error::Download missing: {fpath}")
-            failed = True
+        if not exists(fpath): failed = True
     if failed: exit(1)
 
-    # 打包
-    out_zip = f"{ver_dir}.zip" 
-    if exists(out_zip): remove(out_zip)
-    zipdir(ver_dir, out_zip)
+    changelog_text = get_changelog_robust(ver_string_simple)
 
-    print("\nDOWNLOAD COMPLETE!")
-    print(f"Archive created: {out_zip}")
-    # 输出给 Workflow 捕获
-    print(f"Folder: {ver_dir}")
+    print("Calculating verification data...")
+    all_data = b''
+    total_size = 0
+    for fpath in sorted(update_files):
+        with open(fpath, 'rb') as f:
+            file_data = f.read()
+            all_data += file_data
+            total_size += len(file_data)
+    
+    total_hash = hashlib.sha256(all_data).hexdigest()
+
+    with open('firmware_info.txt', 'w') as f:
+        f.write(f"VERSION={ver_string_simple}\n")
+        f.write(f"FILES={len(update_files)}\n")
+        f.write(f"SIZE_BYTES={total_size}\n")
+        f.write(f"HASH={total_hash}\n")
+        f.write(f"CHANGELOG={changelog_text}\n")
+        f.write(f"SYSTEM_VERSION_FAT={sv_nca_fat}\n")
+        f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
+
+    print(f"Done. Info saved to firmware_info.txt")
