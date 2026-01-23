@@ -7,6 +7,7 @@ import warnings
 import re
 import html
 import sys
+import time
 from struct import unpack
 from binascii import hexlify
 from glob import glob
@@ -62,6 +63,7 @@ def ihexify(n, b):
     return hex(n)[2:].zfill(b * 2)
 
 def dlfile(url, out):
+    # 尝试使用 Aria2，如果失败则回退到 requests
     try:
         run([
             "aria2c", "--no-conf", "--console-log-level=error",
@@ -73,13 +75,13 @@ def dlfile(url, out):
             "--check-certificate=false",
             f"--out={out}", "-c", url
         ], check=True)
-    except Exception as e:
-        # print(f"Aria2 failed, falling back to requests: {e}")
+    except Exception:
+        # print(f"Aria2 failed, falling back to requests for {basename(out)}")
         resp = request(
             "GET", url,
             cert=("keys/switch_client.crt", "keys/switch_client.key"),
             headers={"User-Agent": user_agent},
-            stream=True, verify=False
+            stream=True, verify=False, timeout=60
         )
         resp.raise_for_status()
         with open(out, "wb") as f:
@@ -118,7 +120,7 @@ def nin_request(method, url, headers=None):
     resp = request(
         method, url,
         cert=("keys/switch_client.crt", "keys/switch_client.key"),
-        headers=headers, verify=False
+        headers=headers, verify=False, timeout=30
     )
     resp.raise_for_status()
     return resp
@@ -190,7 +192,6 @@ def dltitle(title_id, version, is_su=False):
                 sv_nca_exfat = ""
                 return
             else:
-                # 抛出异常由主逻辑处理
                 raise VersionNotFoundError(f"Title {title_id} v{version} not found")
         raise
         
@@ -256,7 +257,6 @@ def fetch_meta_version():
         v_maj = raw // 0x4000000
         v_min = (raw - v_maj*0x4000000) // 0x100000
         v_s1  = (raw - v_maj*0x4000000 - v_min*0x100000) // 0x10000
-        # v_s2 通常是内部修订版本
         v_str = f"{v_maj}.{v_min}.{v_s1}"
         return raw, v_str
     except Exception as e:
@@ -301,14 +301,13 @@ if __name__ == "__main__":
             print("::error::Could not determine version.")
             exit(1)
     else:
-        # 1. 尝试计算版本号
         ver_string_simple = VERSION
         parts = list(map(int, VERSION.split(".")))
         if len(parts) == 3: parts.append(0) 
         ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
 
     ver_dir = f"Firmware {ver_string_simple}"
-    print(f"Downloading firmware {ver_string_simple} (Raw: {ver_raw})...")
+    print(f"Downloading firmware {ver_string_simple} (Base Raw: {ver_raw})...")
 
     update_files = []
     update_dls   = []
@@ -317,36 +316,55 @@ if __name__ == "__main__":
     seen_titles.clear()
     queued_ncas.clear()
 
-    # === 智能重试逻辑 ===
-    try:
-        dltitle("0100000000000816", ver_raw, is_su=True)
-    except VersionNotFoundError:
-        print(f"INFO: Version {ver_raw} not found directly. Checking Nintendo Meta for correction...")
+    # === 关键修复：版本号暴力扫描逻辑 ===
+    found_ver = False
+    
+    # 尝试 Base ID 以及后续 15 个可能的 Revision ID
+    # 因为任天堂可能会发布 Revision (例如 19.0.2.1) 但公开版本号仍是 19.0.2
+    for offset in range(0, 16):
+        try_ver = ver_raw + offset
+        try_str = f"+{offset}" if offset > 0 else "Base"
+        # print(f"Checking version variant: {try_ver} ({try_str})")
         
-        # 尝试获取官方当前的 Meta 信息
+        try:
+            seen_titles.clear() # 每次尝试前清除缓存
+            dltitle("0100000000000816", try_ver, is_su=True)
+            print(f"INFO: Successfully found version at revision offset +{offset} (ID: {try_ver})")
+            ver_raw = try_ver # 更新为找到的正确 ID，供后续使用
+            found_ver = True
+            break
+        except VersionNotFoundError:
+            continue
+        except Exception as e:
+            print(f"::warning::Unexpected error while checking offset {offset}: {e}")
+            continue
+
+    if not found_ver:
+        print("INFO: Brute-force failed. Checking Nintendo Meta as last resort...")
         meta_raw, meta_str = fetch_meta_version()
         
         if meta_raw and meta_str == ver_string_simple:
-            # 如果 Meta 显示的版本号字符串（如 19.0.2）和我们想要的一样，
-            # 说明我们的 Raw 计算可能不对（可能是 Revision 差异），使用官方的 Raw 重试
-            print(f"INFO: Meta match found! Correcting Raw ID from {ver_raw} to {meta_raw}...")
-            ver_raw = meta_raw
-            seen_titles.clear() # 清除缓存
+            print(f"INFO: Meta matched requested version string! Trying Meta ID: {meta_raw}")
+            seen_titles.clear()
             try:
-                dltitle("0100000000000816", ver_raw, is_su=True)
+                dltitle("0100000000000816", meta_raw, is_su=True)
+                ver_raw = meta_raw
+                found_ver = True
             except VersionNotFoundError:
-                print("::error::Even with Meta correction, files are 404. CDN is likely not synced yet.")
-                exit(1)
-        else:
-            # 如果 Meta 显示的版本（如 19.0.1）比我们想要的（19.0.2）旧
-            print(f"::error::Nintendo CDN Meta reports version {meta_str}, but you requested {ver_string_simple}.")
-            print("::error::The files have not propagated to the CDN server yet. Please wait a few hours.")
+                 pass
+        
+        if not found_ver:
+            print(f"::error::Fatal: Requested version {ver_string_simple} could not be found on CDN after exhaustive search.")
+            print(f"::error::This usually means the files have not propagated to the CDN server yet, even though RSS detected the update.")
             exit(1)
 
     if not sv_nca_exfat:
-        print("INFO: exFAT not found via meta, attempting separate title...")
-        # exFAT 下载是可选的，如果找不到(404)在 dltitle 内部会忽略
-        dltitle("010000000000081B", ver_raw, is_su=False)
+        print("INFO: exFAT not found via meta, attempting separate title (optional)...")
+        # 对 exFAT 也尝试同样的版本 ID
+        try:
+            dltitle("010000000000081B", ver_raw, is_su=False)
+        except Exception:
+            print("INFO: exFAT download skipped (not found).")
 
     if not update_files:
         print("::error::No files queued for download. Aborting.")
