@@ -158,26 +158,32 @@ def dltitle(title_id, version, is_su=False):
 
 def get_changelog_robust(version_str):
     try:
-        # 增加超时和更真实的 UA
         rss_resp = request("GET", "https://yls8.mtheall.com/ninupdates/feed.php", timeout=15, verify=False)
         content = rss_resp.text
         
-        # 使用正则严格匹配 <title>Switch 版本号</title>
-        # 排除 "Switch 2"
-        # 这里的正则含义：寻找 <title> 标签，开头必须是 Switch [版本号]，后面紧跟 </title>
-        # 这样就不会误匹配到 "Switch 2 21.2.0"
+        # 严格匹配 <title>Switch 版本号</title>，防止匹配到 Switch 2
         title_pattern = rf"<title>Switch {re.escape(version_str)}</title>"
-        
-        # 先找到 item 的起始位置
         match_title = re.search(title_pattern, content)
-        if not match_title:
+        
+        if not match_title: 
             return DEFAULT_CHANGELOG
             
-        # 从标题位置开始往后找第一个 <link>
+        # 从该标题所在位置开始找第一个 link
         item_content = content[match_title.start():]
         link_match = re.search(r"<link>(.*?)</link>", item_content, re.S)
         if not link_match:
             return DEFAULT_CHANGELOG
+            
+        report_url = html.unescape(link_match.group(1).strip())
+        report_resp = request("GET", report_url, timeout=15, verify=False)
+        
+        match_text = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.I | re.S)
+        if match_text:
+            clean_text = re.sub(r'<[^>]+>', '', match_text.group(1).strip())
+            return html.unescape(clean_text)
+    except:
+        pass
+    return DEFAULT_CHANGELOG
             
         report_url = html.unescape(link_match.group(1).strip())
         
@@ -278,3 +284,4 @@ if __name__ == "__main__":
         f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
 
     print(f"Successfully processed Firmware {ver_string_simple}")
+
