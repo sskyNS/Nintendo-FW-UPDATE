@@ -171,9 +171,12 @@ def get_changelog_robust(version_str):
         if match: return re.sub(r'<[^>]+>', '', match.group(1).strip())
     except: pass
     return DEFAULT_CHANGELOG
-
 if __name__ == "__main__":
-    # 初始化证书和 Keys
+    # 初始化证书 (保持原样)
+    if not exists("certificat.pem") or not exists("prod.keys") or not exists("PRODINFO.bin"):
+        print("ERROR: Missing required files")
+        exit(1)
+        
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -186,40 +189,67 @@ if __name__ == "__main__":
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
     
-    # --- [核心修复] 版本确定逻辑 ---
-    target_ver_string = ""
-    target_ver_raw = 0
-
-    if ARG_VERSION:
-        target_ver_string = ARG_VERSION
-        p = list(map(int, ARG_VERSION.split(".")))
-        while len(p) < 4: p.append(0)
-        target_ver_raw = p[0]*0x4000000 + p[1]*0x100000 + p[2]*0x10000 + p[3]
-        print(f"FORCED Version: {target_ver_string} (ID: {target_ver_raw})")
-    else:
-        # 仅在没传参数时查询服务器
+    # 获取 Meta Server 真实版本作为备份
+    meta_ver_string = ""
+    meta_ver_raw = 0
+    try:
         su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-        target_ver_raw = su_meta["system_update_metas"][0]["title_version"]
-        v = target_ver_raw
-        target_ver_string = f"{v//0x4000000}.{(v%0x4000000)//0x100000}.{(v%0x100000)//0x10000}"
-        print(f"LATEST Version from Meta: {target_ver_string}")
+        meta_ver_raw = su_meta["system_update_metas"][0]["title_version"]
+        v = meta_ver_raw
+        meta_ver_string = f"{v//0x4000000}.{(v%0x4000000)//0x100000}.{(v%0x100000)//0x10000}"
+    except:
+        pass
 
-    ver_string_simple = target_ver_string
-    ver_raw = target_ver_raw
+    # 确定目标版本
+    target_ver_string = ARG_VERSION if ARG_VERSION else meta_ver_string
+    
+    def get_raw_id(v_str):
+        p = list(map(int, v_str.split(".")))
+        while len(p) < 4: p.append(0)
+        return p[0]*0x4000000 + p[1]*0x100000 + p[2]*0x10000 + p[3]
+
+    current_attempt_ver = target_ver_string
+    current_attempt_raw = get_raw_id(current_attempt_ver)
 
     update_files = []; update_dls = []; sv_nca_fat = ""; sv_nca_exfat = ""
-    
-    # 核心下载流程
-    dltitle("0100000000000816", ver_raw, is_su=True)
-    if not sv_nca_exfat: dltitle("010000000000081B", ver_raw, is_su=False)
-    
+
+    try:
+        print(f"Targeting Firmware: {current_attempt_ver} (ID: {current_attempt_raw})")
+        dltitle("0100000000000816", current_attempt_raw, is_su=True)
+    except HTTPError as e:
+        if e.response.status_code == 404:
+            print(f"FAILED: Version {current_attempt_ver} not found on CDN (404).")
+            if meta_ver_string and current_attempt_ver != meta_ver_string:
+                print(f"FALLBACK: Reverting to Meta Server version: {meta_ver_string}")
+                current_attempt_ver = meta_ver_string
+                current_attempt_raw = meta_ver_raw
+                seen_titles.clear(); queued_ncas.clear()
+                update_files = []; update_dls = []
+                dltitle("0100000000000816", current_attempt_raw, is_su=True)
+            else:
+                print("CRITICAL: No fallback version available or fallback also failed.")
+                exit(1)
+        else:
+            raise
+
+    # 执行下载
+    if not sv_nca_exfat:
+        try:
+            dltitle("010000000000081B", current_attempt_raw, is_su=False)
+        except: pass
+
+    ver_string_simple = current_attempt_ver
     dlfiles(update_dls)
 
-    # 统计与导出
-    all_data = b''; total_size = 0
+    # 统计并生成 info 文件
+    total_size = 0
+    all_data = b''
     for fpath in sorted(update_files):
-        with open(fpath, 'rb') as f:
-            d = f.read(); all_data += d; total_size += len(d)
+        if exists(fpath):
+            with open(fpath, 'rb') as f:
+                d = f.read()
+                all_data += d
+                total_size += len(d)
     
     with open('firmware_info.txt', 'w') as f:
         f.write(f"VERSION={ver_string_simple}\n")
@@ -229,3 +259,5 @@ if __name__ == "__main__":
         f.write(f"CHANGELOG=\"{get_changelog_robust(ver_string_simple)}\"\n")
         f.write(f"SYSTEM_VERSION_FAT={sv_nca_fat}\n")
         f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
+
+    print(f"Successfully processed Firmware {ver_string_simple}")
