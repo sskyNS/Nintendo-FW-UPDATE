@@ -31,7 +31,6 @@ ENV     = "lp1"
 ARG_VERSION = argv[1] if len(argv) > 1 else ""
 DEFAULT_CHANGELOG = "General system stability improvements to enhance the user's experience."
 
-# --- Helper Functions ---
 def readdata(f, addr, size):
     f.seek(addr); return f.read(size)
 
@@ -90,6 +89,9 @@ def nin_request(method, url, headers=None):
         cert=("keys/switch_client.crt", "keys/switch_client.key"),
         headers=headers, verify=False
     )
+    if resp.status_code == 404:
+        # 提供更详细的错误信息
+        print(f"CDN Error: Resource Not Found (404) at {url}")
     resp.raise_for_status()
     return resp
 
@@ -101,19 +103,18 @@ def parse_cnmt(nca):
     cnmt_file = glob(f"{cnmt_temp_dir}/*.cnmt")[0]
     entries = []
     with open(cnmt_file, "rb") as c:
+        offset = readshort(c, 0xe)
         c_type = readdata(c, 0xc, 1)
-        if c_type[0] == 0x3:
+        if c_type[0] == 0x3: # Meta
             n_entries = readshort(c, 0x12)
-            offset = readshort(c, 0xe)
             base = 0x20 + offset
             for i in range(n_entries):
                 c.seek(base + i*0x10)
                 title_id = unpack("<Q", c.read(8))[0]
                 version  = unpack("<I", c.read(4))[0]
                 entries.append((ihexify(title_id, 8), version))
-        else:
+        else: # Application/Other
             n_entries = readshort(c, 0x10)
-            offset = readshort(c, 0xe)
             base = 0x20 + offset
             for i in range(n_entries):
                 c.seek(base + i*0x38)
@@ -171,12 +172,13 @@ def get_changelog_robust(version_str):
         if match: return re.sub(r'<[^>]+>', '', match.group(1).strip())
     except: pass
     return DEFAULT_CHANGELOG
+
 if __name__ == "__main__":
-    # 初始化证书 (保持原样)
     if not exists("certificat.pem") or not exists("prod.keys") or not exists("PRODINFO.bin"):
-        print("ERROR: Missing required files")
+        print("ERROR: Missing required files (cert/keys/prodinfo)")
         exit(1)
-        
+
+    # 导出 Keys 用于请求
     pem_data = open("certificat.pem", "rb").read()
     cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
     priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
@@ -189,59 +191,36 @@ if __name__ == "__main__":
 
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
     
-    # 获取 Meta Server 真实版本作为备份
-    meta_ver_string = ""
-    meta_ver_raw = 0
-    try:
-        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-        meta_ver_raw = su_meta["system_update_metas"][0]["title_version"]
-        v = meta_ver_raw
-        meta_ver_string = f"{v//0x4000000}.{(v%0x4000000)//0x100000}.{(v%0x100000)//0x10000}"
-    except:
-        pass
-
-    # 确定目标版本
-    target_ver_string = ARG_VERSION if ARG_VERSION else meta_ver_string
+    # 确定目标版本 (严格遵循传入参数)
+    if not ARG_VERSION:
+        print("ERROR: No version provided as argument!")
+        exit(1)
     
-    def get_raw_id(v_str):
-        p = list(map(int, v_str.split(".")))
-        while len(p) < 4: p.append(0)
-        return p[0]*0x4000000 + p[1]*0x100000 + p[2]*0x10000 + p[3]
+    ver_string_simple = ARG_VERSION
+    p = list(map(int, ver_string_simple.split(".")))
+    while len(p) < 4: p.append(0)
+    ver_raw = p[0]*0x4000000 + p[1]*0x100000 + p[2]*0x10000 + p[3]
 
-    current_attempt_ver = target_ver_string
-    current_attempt_raw = get_raw_id(current_attempt_ver)
+    print(f"Processing Target Firmware: {ver_string_simple} (Raw ID: {ver_raw})")
 
     update_files = []; update_dls = []; sv_nca_fat = ""; sv_nca_exfat = ""
+    seen_titles.clear(); queued_ncas.clear()
 
-    try:
-        print(f"Targeting Firmware: {current_attempt_ver} (ID: {current_attempt_raw})")
-        dltitle("0100000000000816", current_attempt_raw, is_su=True)
-    except HTTPError as e:
-        if e.response.status_code == 404:
-            print(f"FAILED: Version {current_attempt_ver} not found on CDN (404).")
-            if meta_ver_string and current_attempt_ver != meta_ver_string:
-                print(f"FALLBACK: Reverting to Meta Server version: {meta_ver_string}")
-                current_attempt_ver = meta_ver_string
-                current_attempt_raw = meta_ver_raw
-                seen_titles.clear(); queued_ncas.clear()
-                update_files = []; update_dls = []
-                dltitle("0100000000000816", current_attempt_raw, is_su=True)
-            else:
-                print("CRITICAL: No fallback version available or fallback also failed.")
-                exit(1)
-        else:
-            raise
-
-    # 执行下载
+    # 执行下载逻辑
+    dltitle("0100000000000816", ver_raw, is_su=True)
     if not sv_nca_exfat:
         try:
-            dltitle("010000000000081B", current_attempt_raw, is_su=False)
-        except: pass
+            dltitle("010000000000081B", ver_raw, is_su=False)
+        except: 
+            print("Notice: exFAT support title 081B not found/needed for this version.")
 
-    ver_string_simple = current_attempt_ver
+    if not update_files:
+        print("ERROR: No files could be located for this version.")
+        exit(1)
+
     dlfiles(update_dls)
 
-    # 统计并生成 info 文件
+    # 统计数据并生成结果文件
     total_size = 0
     all_data = b''
     for fpath in sorted(update_files):
@@ -260,4 +239,4 @@ if __name__ == "__main__":
         f.write(f"SYSTEM_VERSION_FAT={sv_nca_fat}\n")
         f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
 
-    print(f"Successfully processed Firmware {ver_string_simple}")
+    print(f"Success. Firmware {ver_string_simple} fully processed.")
