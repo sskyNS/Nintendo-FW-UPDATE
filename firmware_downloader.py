@@ -13,7 +13,6 @@ from shutil import rmtree
 from subprocess import run, PIPE
 from os import makedirs, remove
 from os.path import basename, exists, join
-from configparser import ConfigParser
 from sys import argv, exit
 
 from requests import request
@@ -160,45 +159,25 @@ def get_changelog_robust(version_str):
     try:
         rss_resp = request("GET", "https://yls8.mtheall.com/ninupdates/feed.php", timeout=15, verify=False)
         content = rss_resp.text
-        
-        # 严格匹配 <title>Switch 版本号</title>，防止匹配到 Switch 2
+        # 严格匹配 <title>Switch 版本号</title> 排除 Switch 2
         title_pattern = rf"<title>Switch {re.escape(version_str)}</title>"
         match_title = re.search(title_pattern, content)
-        
-        if not match_title: 
+        if not match_title:
             return DEFAULT_CHANGELOG
-            
-        # 从该标题所在位置开始找第一个 link
         item_content = content[match_title.start():]
         link_match = re.search(r"<link>(.*?)</link>", item_content, re.S)
         if not link_match:
             return DEFAULT_CHANGELOG
-            
         report_url = html.unescape(link_match.group(1).strip())
         report_resp = request("GET", report_url, timeout=15, verify=False)
-        
         match_text = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.I | re.S)
         if match_text:
             clean_text = re.sub(r'<[^>]+>', '', match_text.group(1).strip())
             return html.unescape(clean_text)
-    except:
-        pass
-    return DEFAULT_CHANGELOG
-            
-        report_url = html.unescape(link_match.group(1).strip())
-        
-        # 抓取具体的报表页面
-        report_resp = request("GET", report_url, timeout=15, verify=False)
-        # 提取 Changelog text 栏目
-        match_text = re.search(r'Changelog text</td>\s*<td.*?>(.*?)</td>', report_resp.text, re.I | re.S)
-        if match_text:
-            # 过滤 HTML 标签并处理转义字符
-            clean_text = re.sub(r'<[^>]+>', '', match_text.group(1).strip())
-            return html.unescape(clean_text)
-            
     except Exception as e:
-        print(f"Warning: Failed to fetch changelog: {e}")
+        print(f"Changelog Fetch Error: {e}")
     return DEFAULT_CHANGELOG
+
 if __name__ == "__main__":
     if not exists("certificat.pem") or not exists("prod.keys") or not exists("PRODINFO.bin"):
         print("ERROR: Missing required files")
@@ -239,6 +218,8 @@ if __name__ == "__main__":
     update_files = []; update_dls = []; sv_nca_fat = ""; sv_nca_exfat = ""
 
     try:
+        # 在下载前必须先确定 ver_string_simple
+        ver_string_simple = current_attempt_ver
         print(f"Targeting Firmware: {current_attempt_ver} (ID: {current_attempt_raw})")
         dltitle("0100000000000816", current_attempt_raw, is_su=True)
     except HTTPError as e:
@@ -248,6 +229,7 @@ if __name__ == "__main__":
                 print(f"FALLBACK: Reverting to Meta Server version: {meta_ver_string}")
                 current_attempt_ver = meta_ver_string
                 current_attempt_raw = meta_ver_raw
+                ver_string_simple = current_attempt_ver
                 seen_titles.clear(); queued_ncas.clear()
                 update_files = []; update_dls = []
                 dltitle("0100000000000816", current_attempt_raw, is_su=True)
@@ -262,7 +244,6 @@ if __name__ == "__main__":
             dltitle("010000000000081B", current_attempt_raw, is_su=False)
         except: pass
 
-    ver_string_simple = current_attempt_ver
     dlfiles(update_dls)
 
     total_size = 0
@@ -284,4 +265,3 @@ if __name__ == "__main__":
         f.write(f"SYSTEM_VERSION_EXFAT={sv_nca_exfat}\n")
 
     print(f"Successfully processed Firmware {ver_string_simple}")
-
