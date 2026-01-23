@@ -67,17 +67,37 @@ jobs:
           # 1. 抓取 RSS 
           RSS_FEED=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
           
-          # 2. 严格过滤：必须包含 'Switch ' 但不能包含 'Switch 2 '
-          # 提取版本号并取第一个（最新的）
-          NEW_VERSION=$(echo "$RSS_FEED" | grep '<title>Switch ' | grep -v 'Switch 2 ' | grep -oP 'Switch \K[0-9.]+' | head -n 1)
+          # 2. 逻辑调整：
+          # - grep '<title>Switch ': 匹配所有包含 Switch 的标题
+          # - grep -v 'Switch 2 ': 排除掉 Switch 2
+          # - grep -oP 'Switch \K[0-9.]+': 只提取版本数字部分
+          # - sort -V: 关键！按照版本号语义排序（例如 21.2.0 会排在 19.0.2 后面）
+          # - tail -n 1: 取排序后的最后一个（即版本号最大的）
+          NEW_VERSION=$(echo "$RSS_FEED" | \
+            grep '<title>Switch ' | \
+            grep -v 'Switch 2 ' | \
+            grep -oP 'Switch \K[0-9.]+' | \
+            sort -V | \
+            tail -n 1)
 
           if [ -z "$NEW_VERSION" ]; then
             echo "::error::Could not parse a valid Switch 1 version."
             exit 1 
           fi
 
-          echo "INFO: Latest parsed version: $NEW_VERSION"
+          echo "INFO: Highest parsed version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+          set +e 
+          CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
+          set -e
+          CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
+          
+          UPDATE_NEEDED="false"
+          if [ "${{ github.event.inputs.force_update }}" == "true" ] || [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+            UPDATE_NEEDED="true"
+          fi
+          echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
           set +e 
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
