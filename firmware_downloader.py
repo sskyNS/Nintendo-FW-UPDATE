@@ -14,7 +14,7 @@ from subprocess import run, PIPE
 from os import makedirs, remove
 from os.path import basename, exists, join
 from configparser import ConfigParser
-from sys import argv
+from sys import argv, exit
 
 from requests import request
 from requests.exceptions import HTTPError
@@ -58,6 +58,7 @@ def ihexify(n, b):
     return hex(n)[2:].zfill(b * 2)
 
 def dlfile(url, out):
+    print(f"Downloading {basename(out)}...")
     try:
         run([
             "aria2c", "--no-conf", "--console-log-level=error",
@@ -69,8 +70,8 @@ def dlfile(url, out):
             "--check-certificate=false",
             f"--out={out}", "-c", url
         ], check=True)
-    except FileNotFoundError:
-        print(f"downloading {basename(out)} via requests")
+    except Exception as e:
+        print(f"Aria2 failed, falling back to requests: {e}")
         resp = request(
             "GET", url,
             cert=("keys/switch_client.crt", "keys/switch_client.key"),
@@ -83,6 +84,9 @@ def dlfile(url, out):
                 f.write(chunk)
 
 def dlfiles(dltable):
+    if not dltable:
+        return
+    
     with open("dl.tmp", "w") as f:
         for url, dirc, fname, fhash in dltable:
             f.write(f"{url}\n\tout={fname}\n\tdir={dirc}\n\tchecksum=sha-256={fhash}\n")
@@ -97,7 +101,8 @@ def dlfiles(dltable):
             "--check-certificate=false",
             "-x", "16", "-s", "16", "-i", "dl.tmp"
         ], check=True)
-    except FileNotFoundError:
+    except Exception as e:
+        print(f"Batch Aria2 failed, falling back to sequential: {e}")
         for url, dirc, fname, fhash in dltable:
             makedirs(dirc, exist_ok=True)
             out = join(dirc, fname)
@@ -112,22 +117,38 @@ def nin_request(method, url, headers=None):
     if headers is None:
         headers = {}
     headers.update({"User-Agent": user_agent})
-    resp = request(
-        method, url,
-        cert=("keys/switch_client.crt", "keys/switch_client.key"),
-        headers=headers, verify=False
-    )
-    resp.raise_for_status()
-    return resp
+    try:
+        resp = request(
+            method, url,
+            cert=("keys/switch_client.crt", "keys/switch_client.key"),
+            headers=headers, verify=False
+        )
+        resp.raise_for_status()
+        return resp
+    except Exception as e:
+        print(f"Request Error to {url}: {e}")
+        raise
 
 def parse_cnmt(nca):
     ncaf = basename(nca)
     hactool_bin = "hactool.exe" if os.name == "nt" else "./hactool" 
     cnmt_temp_dir = f"cnmt_tmp_{ncaf}"
-    run(
-        [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
-        stdout=PIPE, stderr=PIPE
-    )
+    
+    # Check if hactool exists and works
+    if not exists(hactool_bin):
+        print(f"CRITICAL ERROR: {hactool_bin} not found!")
+        exit(1)
+
+    try:
+        run(
+            [hactool_bin, "-k", "prod.keys", nca, "--section0dir", cnmt_temp_dir],
+            stdout=PIPE, stderr=PIPE, check=True
+        )
+    except Exception as e:
+        print(f"Hactool failed to decrypt CNMT: {e}")
+        print("Check if your prod.keys contains the correct keys for this firmware version.")
+        exit(1)
+
     cnmt_file = glob(f"{cnmt_temp_dir}/*.cnmt")[0]
     entries = []
     with open(cnmt_file, "rb") as c:
@@ -162,20 +183,30 @@ def dltitle(title_id, version, is_su=False):
     if key in seen_titles: return
     seen_titles.add(key)
     p = "s" if is_su else "a"
+    
+    url = f"https://atumn.hac.{ENV}.d4c.nintendo.net/t/{p}/{title_id}/{version}?device_id={device_id}"
+    
     try:
-        cnmt_id = nin_request(
-            "HEAD",
-            f"https://atumn.hac.{ENV}.d4c.nintendo.net/t/{p}/{title_id}/{version}?device_id={device_id}"
-        ).headers["X-Nintendo-Content-ID"]
+        head_resp = nin_request("HEAD", url)
+        cnmt_id = head_resp.headers["X-Nintendo-Content-ID"]
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            if title_id == "010000000000081B": sv_nca_exfat = ""
-            return
+            print(f"WARNING: Title {title_id} v{version} returned 404 Not Found.")
+            if title_id == "010000000000081B": # exFAT update
+                sv_nca_exfat = ""
+                return
+            else:
+                print("CRITICAL: Main System Update title not found! CDN may not be ready or keys invalid.")
+                # We do NOT return here if it's the main system update, we let it crash or handle later
+                # But to trigger the error properly:
+                return 
         raise
+    
     ver_dir = f"Firmware {ver_string_simple}"
     makedirs(ver_dir, exist_ok=True)
     cnmt_nca = f"{ver_dir}/{cnmt_id}.cnmt.nca"
     update_files.append(cnmt_nca)
+    
     dlfile(
         f"https://atumn.hac.{ENV}.d4c.nintendo.net/c/{p}/{cnmt_id}?device_id={device_id}",
         cnmt_nca
@@ -231,44 +262,71 @@ def get_changelog_robust(version_str):
     return DEFAULT_CHANGELOG
 
 if __name__ == "__main__":
-    if not exists("certificat.pem"): exit(1)
-    pem_data = open("certificat.pem", "rb").read()
-    cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
-    priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
-    makedirs("keys", exist_ok=True)
-    cert.save("keys/switch_client.crt", tls.TYPE_PEM)
-    priv.save("keys/switch_client.key", tls.TYPE_PEM)
+    print("Initializing Downloader...")
+    
+    if not exists("certificat.pem"): 
+        print("ERROR: certificat.pem missing")
+        exit(1)
+    
+    # Setup Keys
+    try:
+        pem_data = open("certificat.pem", "rb").read()
+        cert = tls.TLSCertificate.parse(pem_data, tls.TYPE_PEM)
+        priv = tls.TLSPrivateKey.parse(pem_data, tls.TYPE_PEM)
+        makedirs("keys", exist_ok=True)
+        cert.save("keys/switch_client.crt", tls.TYPE_PEM)
+        priv.save("keys/switch_client.key", tls.TYPE_PEM)
+    except Exception as e:
+        print(f"ERROR parsing certificate: {e}")
+        exit(1)
 
-    if not exists("prod.keys"): exit(1)
+    if not exists("prod.keys"): 
+        print("ERROR: prod.keys missing")
+        exit(1)
+    
     prod_keys = ConfigParser(strict=False)
     with open("prod.keys") as f: prod_keys.read_string("[keys]" + f.read())
 
-    if not exists("PRODINFO.bin"): exit(1)
+    if not exists("PRODINFO.bin"): 
+        print("ERROR: PRODINFO.bin missing")
+        exit(1)
+        
     with open("PRODINFO.bin", "rb") as pf:
-        if pf.read(4) != b"CAL0": exit(1)
+        if pf.read(4) != b"CAL0": 
+            print("ERROR: Invalid PRODINFO.bin (Header mismatch)")
+            exit(1)
         device_id = utf8(readdata(pf, 0x2b56, 0x10))
-
+    
+    print(f"Device ID: {device_id}")
     user_agent = f"NintendoSDK Firmware/11.0.0-0 (platform:NX; did:{device_id}; eid:{ENV})"
 
     if VERSION == "":
-        print("INFO: Searching for latest version...")
-        su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
-        ver_raw = su_meta["system_update_metas"][0]["title_version"]
-        ver_major = ver_raw // 0x4000000
-        ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
-        ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
-        ver_sub2  = ver_raw - ver_major*0x4000000 - ver_minor*0x100000 - ver_sub1*0x10000
-        ver_string_raw = f"{ver_major}.{ver_minor}.{ver_sub1}.{str(ver_sub2).zfill(4)}"
-        ver_string_simple = f"{ver_major}.{ver_minor}.{ver_sub1}"
+        print("INFO: Searching for latest version from Nintendo...")
+        try:
+            su_meta = nin_request("GET", f"https://sun.hac.{ENV}.d4c.nintendo.net/v1/system_update_meta?device_id={device_id}").json()
+            ver_raw = su_meta["system_update_metas"][0]["title_version"]
+            ver_major = ver_raw // 0x4000000
+            ver_minor = (ver_raw - ver_major*0x4000000) // 0x100000
+            ver_sub1  = (ver_raw - ver_major*0x4000000 - ver_minor*0x100000) // 0x10000
+            ver_sub2  = ver_raw - ver_major*0x4000000 - ver_minor*0x100000 - ver_sub1*0x10000
+            ver_string_raw = f"{ver_major}.{ver_minor}.{ver_sub1}.{str(ver_sub2).zfill(4)}"
+            ver_string_simple = f"{ver_major}.{ver_minor}.{ver_sub1}"
+        except Exception as e:
+            print(f"Failed to fetch meta from Nintendo: {e}")
+            exit(1)
     else:
         ver_string_simple = VERSION
-        parts = list(map(int, VERSION.split(".")))
-        if len(parts) == 3: parts.append(0) 
-        ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
-        ver_string_raw = f"{parts[0]}.{parts[1]}.{parts[2]}.{str(parts[3]).zfill(4)}"
+        try:
+            parts = list(map(int, VERSION.split(".")))
+            if len(parts) == 3: parts.append(0) 
+            ver_raw = parts[0]*0x4000000 + parts[1]*0x100000 + parts[2]*0x10000 + parts[3]
+            ver_string_raw = f"{parts[0]}.{parts[1]}.{parts[2]}.{str(parts[3]).zfill(4)}"
+        except ValueError:
+            print(f"Invalid Version Format: {VERSION}")
+            exit(1)
 
+    print(f"Target Firmware: {ver_string_simple} (Raw: {ver_raw})")
     ver_dir = f"Firmware {ver_string_simple}"
-    print(f"Downloading firmware {ver_string_simple}...")
 
     update_files = []
     update_dls   = []
@@ -277,19 +335,34 @@ if __name__ == "__main__":
     seen_titles.clear()
     queued_ncas.clear()
 
+    print(f"Checking System Update Title (0100000000000816)...")
     dltitle("0100000000000816", ver_raw, is_su=True)
     
     if not sv_nca_exfat:
-        print("INFO: exFAT not found via meta, attempting separate title...")
+        print("INFO: exFAT not found via meta, checking separate title (010000000000081B)...")
         dltitle("010000000000081B", ver_raw, is_su=False)
+
+    # === 关键修复：如果列表为空，必须报错退出 ===
+    if not update_files or not update_dls:
+        print("ERROR: No files queued for download!")
+        print("Possible causes:")
+        print("1. Certificate is banned or invalid (403).")
+        print("2. Firmware version not yet live on this CDN server (404).")
+        print("3. Wrong PRODINFO/Device ID.")
+        exit(1)
 
     print(f"Starting batch download for {len(update_dls)} files...")
     dlfiles(update_dls)
 
     failed = False
     for fpath in update_files:
-        if not exists(fpath): failed = True
-    if failed: exit(1)
+        if not exists(fpath): 
+            print(f"Missing file: {fpath}")
+            failed = True
+    
+    if failed:
+        print("ERROR: Verify failed. Some files were not downloaded.")
+        exit(1)
 
     changelog_text = get_changelog_robust(ver_string_simple)
 
