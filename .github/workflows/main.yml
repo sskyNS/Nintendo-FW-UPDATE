@@ -55,7 +55,7 @@ jobs:
             cp hactool-linux hactool
             chmod +x hactool
           else
-            echo "::error::hactool-linux not found!"
+            echo "::error::hactool-linux not found in root!"
             exit 1
           fi
 
@@ -64,26 +64,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 抓取 RSS
+          # 抓取 RSS 并通过 sort -V 确保提取数值最大的版本号 (21.2.0)
           RSS_FEED=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php')
-          
-          # 2. 改进提取逻辑：
-          # grep '<title>Switch '         -> 获取所有 Switch 相关标题
-          # grep -v 'Switch 2 '           -> 排除掉 Switch 2
-          # grep -oP 'Switch \K[0-9.]+'   -> 只提取版本号数字部分
-          # sort -V                       -> 关键：按版本号语义排序 (19.x 会排在 21.x 前面)
-          # tail -n 1                     -> 取排序后的最后一个（即最大版本号）
           NEW_VERSION=$(echo "$RSS_FEED" | grep '<title>Switch ' | grep -v 'Switch 2 ' | grep -oP 'Switch \K[0-9.]+' | sort -V | tail -n 1)
 
           if [ -z "$NEW_VERSION" ]; then
-            echo "::error::Could not parse a valid Switch 1 version."
+            echo "::error::Failed to parse version from RSS"
             exit 1 
           fi
 
-          echo "INFO: Max Version Detected: $NEW_VERSION"
+          echo "INFO: Highest Version Detected: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 获取仓库当前的最新版本
           set +e 
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
@@ -96,7 +88,6 @@ jobs:
           echo "update_needed=$UPDATE_NEEDED" >> $GITHUB_OUTPUT
 
       - name: Execute download script
-        id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           set -o pipefail
@@ -111,9 +102,7 @@ jobs:
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           if [ -z "$FIRMWARE_FOLDER" ]; then exit 1; fi
           
-          ORIGINAL_SIZE=$(du -sb "$FIRMWARE_FOLDER" | cut -f1)
           (cd "$FIRMWARE_FOLDER" && zip -r -9 -q ../Firmware.zip .)
-          
           echo "zip_size=$(stat -c%s Firmware.zip)" >> $GITHUB_OUTPUT
           echo "sha256_hash=$(sha256sum Firmware.zip | cut -d' ' -f1)" >> $GITHUB_OUTPUT
           rm -rf "$FIRMWARE_FOLDER"
@@ -126,7 +115,6 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 修正下载统计逻辑
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
@@ -134,8 +122,8 @@ jobs:
           
           NEW_TOTAL=$(( (HISTORY_BASE == "null" ? 0 : HISTORY_BASE) + (CURRENT_COUNT == "null" ? 0 : CURRENT_COUNT) ))
 
+          # 读取 Python 生成的信息
           source firmware_info.txt
-          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc)
           ZIP_MB=$(echo "scale=2; $ZIP_SIZE_BYTES / 1024 / 1024" | bc)
 
           {
