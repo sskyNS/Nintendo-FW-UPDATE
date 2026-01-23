@@ -1,8 +1,8 @@
-name: Firmware Auto Downloader (Fixed)
+name: Firmware Auto Downloader (Repo Files)
 
 on:
   schedule:
-    - cron: '0 * * * *' # 每小时检查一次
+    - cron: '0 * * * *'
   push:
     branches: [ "main", "master" ]
     paths-ignore:
@@ -14,7 +14,7 @@ on:
       force_update:
         description: 'Force update'
         required: false
-        default: false # 默认不强制，只有版本更新才跑
+        default: false
         type: boolean
 
 jobs:
@@ -51,19 +51,32 @@ jobs:
 
       - name: Setup hactool
         run: |
+          # 确保你的仓库根目录有名为 hactool-linux 的文件
           if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool
             chmod +x hactool
+            echo "Hactool setup complete."
           else
-            echo "::warning::hactool-linux not found"
+            echo "::error::hactool-linux binary not found in repository root!"
+            # 这里不强制退出，防止因为没有hactool导致看不到后面的debug信息，但脚本运行时会报错
           fi
+
+      # 新增：调试步骤，检查文件是否真的存在
+      - name: Debug file existence
+        run: |
+          echo "Listing all files in root directory:"
+          ls -la
+          
+          echo "Checking specifically for required files (Case Sensitive!):"
+          if [ -f "prod.keys" ]; then echo "[OK] prod.keys found"; else echo "[MISSING] prod.keys (or wrong case)"; fi
+          if [ -f "certificat.pem" ]; then echo "[OK] certificat.pem found"; else echo "[MISSING] certificat.pem (or wrong case)"; fi
+          if [ -f "PRODINFO.bin" ]; then echo "[OK] PRODINFO.bin found"; else echo "[MISSING] PRODINFO.bin (or wrong case)"; fi
 
       - name: Check firmware version
         id: version_check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 获取 RSS 上的最新版本
           LATEST_TITLE=$(curl -s 'https://yls8.mtheall.com/ninupdates/feed.php' | \
                          grep '<title>Switch ' | \
                          grep -v '<title>Switch 2 ' | \
@@ -78,16 +91,13 @@ jobs:
           echo "INFO: RSS Latest Version: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
-          # 2. 获取当前仓库 Latest Release 的版本号
           set +e 
           CURRENT_RELEASE_NAME=$(gh release view latest --json name --jq '.name' 2>/dev/null)
           set -e
 
-          # 从 "Firmware 17.0.1" 这种格式中提取纯版本号 "17.0.1"
           CURRENT_VERSION=$(echo "$CURRENT_RELEASE_NAME" | grep -oP 'Firmware \K[0-9.]+' || echo "0.0.0")
           echo "INFO: Current Release Version: $CURRENT_VERSION"
 
-          # 3. 核心判断逻辑
           UPDATE_NEEDED="false"
 
           if [ "${{ github.event.inputs.force_update }}" == "true" ]; then
@@ -106,12 +116,15 @@ jobs:
         id: download_script
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
+          # 关键：开启 pipefail，如果 Python 报错，立即停止 Workflow
+          set -o pipefail
+
           rm -rf "Firmware "* 2>/dev/null || true
           rm -f "Firmware "*.zip 2>/dev/null || true
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
-          # 传入检测到的新版本号给脚本
+          # 运行脚本
           python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
       - name: Process firmware files
@@ -119,10 +132,12 @@ jobs:
         if: steps.version_check.outputs.update_needed == 'true'
         run: |
           echo "=== Processing Files ==="
+          ls -F # 再次检查生成的目录
+          
           FIRMWARE_FOLDER=$(find . -maxdepth 1 -type d -name "Firmware *" | head -n 1)
           
           if [ -z "$FIRMWARE_FOLDER" ]; then
-            echo "::error::Firmware folder not found!"
+            echo "::error::Firmware folder not found! Python script failed silently?"
             exit 1
           fi
           
@@ -148,7 +163,6 @@ jobs:
           ZIP_SHA256: ${{ steps.process_files.outputs.sha256_hash }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取历史下载计数逻辑
           PREV_DATA=$(gh release view latest --json body,assets 2>/dev/null || echo "{}")
           OLD_BODY=$(echo "$PREV_DATA" | jq -r .body)
           HISTORY_BASE=$(echo "$OLD_BODY" | grep -oP '<!-- history_downloads:\s*\K[0-9]+' || echo "0")
@@ -158,7 +172,6 @@ jobs:
           if [ -z "$CURRENT_COUNT" ] || [ "$CURRENT_COUNT" = "null" ]; then CURRENT_COUNT=0; fi
           NEW_TOTAL_DOWNLOADS=$((HISTORY_BASE + CURRENT_COUNT))
 
-          # 读取 Python 脚本生成的信息
           get_val() { grep "^$1=" firmware_info.txt | cut -d'=' -f2-; }
           if [ -f firmware_info.txt ]; then
              VERSION=$(get_val VERSION)
