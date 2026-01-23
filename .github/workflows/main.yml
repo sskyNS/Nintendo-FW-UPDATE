@@ -49,7 +49,7 @@ jobs:
           && sudo apt update \
           && sudo apt install gh -y
 
-      - name: Setup hactool
+    - name: Setup hactool
         run: |
           if [ -f "hactool-linux" ]; then
             cp hactool-linux hactool
@@ -57,6 +57,17 @@ jobs:
           else
             echo "::warning::hactool-linux not found"
           fi
+
+      - name: Restore key files
+        if: steps.version_check.outputs.update_needed == 'true'
+        env:
+          PROD_KEYS: ${{ secrets.PROD_KEYS }}
+          CERT_PEM: ${{ secrets.CERT_PEM }}
+          PRODINFO_BIN: ${{ secrets.PRODINFO_BIN }}
+        run: |
+          echo "$PROD_KEYS" > prod.keys
+          echo "$CERT_PEM" > certificat.pem
+          echo "$PRODINFO_BIN" | base64 -d > PRODINFO.bin
 
       - name: Check firmware version
         id: version_check
@@ -111,6 +122,9 @@ jobs:
           rm -f firmware_info.txt firmware_output.txt
           
           echo "Starting Downloader..."
+          set -o pipefail
+          python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
+          
           # 传入检测到的新版本号给脚本
           python3 firmware_downloader.py "${{ steps.version_check.outputs.new_version }}" | tee firmware_output.txt
 
