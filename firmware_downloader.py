@@ -194,8 +194,61 @@ def dltitle(title_id, version, is_su=False):
                     ver_dir, f"{nca_id}.nca", nca_hash
                 ))
 
+def get_changelog_from_switchbrew(version_str):
+    """从 switchbrew.org 获取固件 changelog（通过 MediaWiki API 取 wikitext 并解析）。"""
+    try:
+        api_url = f"https://switchbrew.org/w/api.php?action=parse&page={version_str}&prop=wikitext&format=json"
+        resp = request("GET", api_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+        wikitext = data.get("parse", {}).get("wikitext", {}).get("*", "")
+        if not wikitext:
+            return ""
+
+        start_marker = "==Change-log=="
+        start = wikitext.find(start_marker)
+        if start == -1:
+            return ""
+        start += len(start_marker)
+        end = wikitext.find("\n==", start)
+        if end == -1:
+            end = len(wikitext)
+        section = wikitext[start:end]
+
+        lines = []
+        for raw in section.split("\n"):
+            line = raw.strip()
+            if not line:
+                continue
+            if "change-log:" in line.lower():
+                continue  # 跳过 "Official ALL change-log:" 标题行
+            if line.startswith("*"):
+                line = line[1:].strip()
+            line = re.sub(r'\[\[(?:[^\]|]*\|)?([^\]]*)\]\]', r'\1', line)
+            line = re.sub(r'\[https?://[^\s\]]+(?:\s+([^\]]+))?\]', r'\1', line)
+            line = re.sub(r'<[^>]+>', '', line)
+            line = line.strip()
+            if line:
+                lines.append(line)
+
+        changelog = " ".join(lines).strip()
+        if len(changelog) > 5:
+            return changelog
+    except Exception as e:
+        print(f"Switchbrew changelog fetch error: {e}")
+    return ""
+
+
 def get_changelog_robust(version_str):
     print("Attempting to fetch changelog...")
+    # 优先从 switchbrew 获取真实 changelog（反映实质性更新内容）
+    text = get_changelog_from_switchbrew(version_str)
+    if text:
+        print(f"Got switchbrew changelog: {text[:80]}...")
+        return text
+
+    # fallback 到 ninupdates（原逻辑）
     try:
         rss_url = "https://yls8.mtheall.com/ninupdates/feed.php"
         rss_resp = request("GET", rss_url, headers={"User-Agent": user_agent}, verify=False, timeout=10)
